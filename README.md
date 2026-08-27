@@ -33,3 +33,17 @@ saying so.
 Both consumers pin a released version. Changes here are breaking changes for
 two repositories at once, which is the intended friction: a shared kernel that
 is cheap to change is a shared kernel that drifts.
+
+## Licence
+
+Apache 2.0, the same as `nox`, from which this code was extracted. The licence
+is not incidental: `nox` is a public Apache-2.0 module that depends on this one,
+so a shared kernel under any more restrictive terms — or under none, which is
+what an unlicensed public repository means — would leave everyone redistributing
+the scanner without the rights to do so.
+
+## Provenance
+
+Extracted from `nox-hq/nox` at commit `703b105` on main, not from the `v1.30.1`
+tag: `vulnsource`'s superset model (`status.go`, `verify.go`, `match.go`) landed
+after that release. `evidence` and `degrade` are unchanged since `v1.30.1`.
