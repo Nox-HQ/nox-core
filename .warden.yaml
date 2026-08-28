@@ -1,0 +1,21 @@
+# warden gate for the shared kernel.
+#
+# This module is small but load-bearing: nox and nox-intelligence both depend
+# on it, so a mistake here breaks a public scanner and a private service at the
+# same time, and neither would find out until they next bumped the version.
+# That is exactly the kind of change worth checking before it leaves the
+# machine.
+#
+# evidence in particular defines what CONFIRMED means for both consumers. There
+# is no second definition to disagree with, which is the point — and also why a
+# careless edit here is expensive.
+status:
+  enabled: true
+hooks: {pre_commit: true, pre_push: true}
+commands:
+  lint: "golangci-lint run ./..."
+  test: "go test -race ./..."
+steps:
+  pre_commit: [lint]
+  pre_push: [test, lint]
+parallel: true
