@@ -266,6 +266,9 @@ func (l *Ledger) Len() int { return len(l.Claims) }
 func (l *Ledger) Kinds() []Kind {
 	seen := make(map[Kind]bool, len(l.Claims))
 	for _, c := range l.Claims {
+		if !c.Live() {
+			continue
+		}
 		seen[c.Kind] = true
 	}
 	out := make([]Kind, 0, len(seen))
@@ -293,9 +296,37 @@ func (l *Ledger) Strongest() (Claim, bool) {
 }
 
 // HasDeterministic reports whether any claim was machine-established.
+// StrongestLive returns the strongest claim that actually counts — live status,
+// recognised kind — or false if nothing does.
+//
+// Strongest is deliberately different: it reports what is IN the ledger, so an
+// audit view can show a retracted or unrecognised claim rather than pretending
+// a non-empty trail is empty. This one reports what the ledger SUPPORTS, and it
+// is what a caller explaining a verdict wants.
+//
+// Explaining a conclusion with a claim that did not contribute to it is the
+// specific failure this separation prevents. A verdict of LOW justified by "the
+// exploit reproduced under the determinism gate — retracted" reads as a bug in
+// the verdict, and a reader cannot tell which half to believe.
+func (l *Ledger) StrongestLive() (Claim, bool) {
+	best := -1
+	for i := range l.Claims {
+		if !l.Claims[i].Live() {
+			continue
+		}
+		if best < 0 || l.Claims[i].Kind.Strength() > l.Claims[best].Kind.Strength() {
+			best = i
+		}
+	}
+	if best < 0 {
+		return Claim{}, false
+	}
+	return l.Claims[best], true
+}
+
 func (l *Ledger) HasDeterministic() bool {
 	for _, c := range l.Claims {
-		if c.Kind.Deterministic() {
+		if c.Live() && c.Kind.Deterministic() {
 			return true
 		}
 	}
@@ -306,24 +337,27 @@ func (l *Ledger) HasDeterministic() bool {
 // to label a verdict as partly semantic.
 func (l *Ledger) HasSemantic() bool {
 	for _, c := range l.Claims {
-		if c.Kind.Semantic() {
+		if c.Live() && c.Kind.Semantic() {
 			return true
 		}
 	}
 	return false
 }
 
-// IndependentSources counts distinct non-empty Provenance.SourceID values.
+// IndependentSources counts distinct non-empty Provenance.SourceID values
+// among LIVE claims.
 //
 // This is the guard against the failure mode in §11 of the intelligence PRD:
 // one project scanning itself a hundred times produces a hundred observations
 // but exactly ONE independent source. Unattributed claims (empty SourceID)
 // never count, because an unattributed claim cannot be shown to be independent
-// of any other.
+// of any other. Neither does a retracted one: a reporter who withdrew their
+// observation is not corroborating anything, and counting them would let
+// consensus survive the withdrawal of the belief it was made of.
 func (l *Ledger) IndependentSources() int {
 	seen := make(map[string]bool, len(l.Claims))
 	for _, c := range l.Claims {
-		if c.Provenance.SourceID != "" {
+		if c.Live() && c.Provenance.SourceID != "" {
 			seen[c.Provenance.SourceID] = true
 		}
 	}
