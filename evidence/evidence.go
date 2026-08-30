@@ -207,11 +207,44 @@ type Provenance struct {
 }
 
 // Claim is one evidence-bearing statement about a vulnerability or exploit.
+//
+// Subject, Polarity and Status all have meaningful zero values, and that is
+// what lets a claim written before they existed keep meaning exactly what it
+// meant: the unattributed subject, a supporting claim, and an active one. A
+// producer that sets none of them gets the behaviour it had.
 type Claim struct {
 	Kind       Kind              `json:"kind"`
 	Statement  string            `json:"statement"`
 	Provenance Provenance        `json:"provenance"`
 	Attributes map[string]string `json:"attributes,omitempty"`
+
+	// Subject is what the claim is about. The zero Subject means unattributed,
+	// which aggregates as a single subject — see SubjectKind for why mixing
+	// subjects in one bag was the bug this field closes.
+	Subject Subject `json:"subject,omitzero"`
+	// Polarity says whether the claim argues for the proposition, against it,
+	// or neither. The zero value reads as PolaritySupports.
+	Polarity Polarity `json:"polarity,omitempty"`
+	// Status is the claim's lifecycle position. The zero value is active; a
+	// retracted or superseded claim stays in the ledger and weighs nothing.
+	Status Status `json:"status,omitempty"`
+}
+
+// Live reports whether the claim counts toward a verdict: its status must be
+// active and its kind recognised. It is the single predicate every aggregation
+// below filters on.
+func (c Claim) Live() bool { return c.Status.Live() && c.Kind.Valid() }
+
+// Supports reports whether the claim argues for its subject's proposition.
+func (c Claim) Supports() bool { return c.Polarity.Effective() == PolaritySupports }
+
+// Refutes reports whether the claim argues against its subject's proposition.
+func (c Claim) Refutes() bool { return c.Polarity.Effective() == PolarityRefutes }
+
+// Authorized reports whether a permits this claim's producer to assert this
+// claim's kind. A non-enforcing authority authorizes everything.
+func (c Claim) Authorized(a Authority) bool {
+	return a.Permits(c.Provenance.Source, c.Kind)
 }
 
 // Ledger is an ordered set of claims about one subject, and the rules for
@@ -299,41 +332,20 @@ func (l *Ledger) IndependentSources() int {
 
 // Confidence aggregates the ledger into a level.
 //
-// The rules, in order:
+// It is ConfidenceUnder with no authority enforcement, and the rules live in
+// ConfidenceAboutUnder. This method is kept because it is what both consumers
+// call, and because for a ledger written before subjects and polarity existed
+// it answers exactly what it always did: every such claim carries the zero
+// Subject, so the ledger has one subject; the zero Polarity, so every claim
+// supports; and the zero Status, so every claim is live.
 //
-//  1. An empty ledger is LOW.
-//  2. CONFIRMED requires a DETERMINISTIC claim of at least reproduction
-//     strength (controlled reproduction, dynamic exploit, maintainer
-//     confirmation, or a public advisory). No amount of heuristics, judgments,
-//     or repeated observation reaches it — §24: "No single agent conclusion
-//     should independently elevate a candidate to CONFIRMED."
-//  3. Otherwise the level follows the strongest claim, with one promotion: two
-//     or more INDEPENDENT sources lift the result one level, capped at HIGH.
-//     Corroboration strengthens belief; it never substitutes for proof.
-//  4. A ledger whose only claims are semantic is capped at MEDIUM, however many
-//     judgments it holds — restating an opinion is not evidence.
+// Two behaviours changed for ledgers that DO use the new fields, and both are
+// the point of adding them. A retracted or superseded claim no longer counts.
+// A ledger holding claims about more than one subject has no single answer and
+// returns LOW rather than picking the heaviest claim across unrelated
+// propositions — see ConfidenceUnder.
 func (l *Ledger) Confidence() Confidence {
-	if len(l.Claims) == 0 {
-		return ConfidenceLow
-	}
-
-	for _, c := range l.Claims {
-		if c.Kind.Deterministic() && c.Kind.Strength() >= strengths[KindControlledReproduction] {
-			return ConfidenceConfirmed
-		}
-	}
-
-	strongest, _ := l.Strongest()
-	level := levelForStrength(strongest.Kind.Strength())
-
-	if l.IndependentSources() >= 2 && level.rank() < ConfidenceHigh.rank() {
-		level = promote(level)
-	}
-
-	if onlySemantic(l.Claims) && level.AtLeast(ConfidenceHigh) {
-		level = ConfidenceMedium
-	}
-	return level
+	return l.ConfidenceUnder(Authority{})
 }
 
 // levelForStrength maps a 0-100 strength onto a confidence band. The bands stop
@@ -360,14 +372,4 @@ func promote(c Confidence) Confidence {
 	default:
 		return c
 	}
-}
-
-// onlySemantic reports whether every claim is an LLM judgment.
-func onlySemantic(claims []Claim) bool {
-	for _, c := range claims {
-		if !c.Kind.Semantic() {
-			return false
-		}
-	}
-	return len(claims) > 0
 }
