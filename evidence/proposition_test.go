@@ -366,3 +366,37 @@ func TestCorroborationCountsBelieversNotParticipants(t *testing.T) {
 		t.Errorf("a retracted observation still corroborated: got %d, want 1", got)
 	}
 }
+
+// TestCandidateIsASubject pins the eighth kind and, more usefully, the reason
+// it exists: a pattern scanner's claims are overwhelmingly about a match at a
+// location, and a refuted candidate never becomes a finding — so a model that
+// could only speak about findings would lose exactly the reasoning worth
+// keeping.
+func TestCandidateIsASubject(t *testing.T) {
+	c := Subject{Kind: SubjectCandidate, ID: "SEC-240@config/app.go:41:9"}
+	if !c.Valid() {
+		t.Fatal("a candidate subject did not validate")
+	}
+
+	l := &Ledger{}
+	l.Add(Claim{
+		Kind: KindHeuristic, Subject: c,
+		Statement:  "pattern matched a field/separator/value assignment",
+		Provenance: Provenance{Source: "nox-scan"},
+	})
+	if got := l.ConfidenceAbout(c); got != ConfidenceLow {
+		t.Errorf("a lone pattern match scored %s, want LOW", got)
+	}
+
+	l.Add(Claim{
+		Kind: KindStatic, Subject: c, Polarity: PolarityRefutes,
+		Statement:  "the match lies entirely within a comment region",
+		Provenance: Provenance{Source: "nox-scan"},
+	})
+	if got := l.ConfidenceAbout(c); got != ConfidenceLow {
+		t.Errorf("a refuted candidate scored %s, want LOW", got)
+	}
+	if l.Len() != 2 {
+		t.Error("refuting a candidate discarded the claims; the reasoning is the point")
+	}
+}

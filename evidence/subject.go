@@ -50,6 +50,25 @@ const (
 	// SubjectHypothesis is a proposed exploit — the thing dynamic validation
 	// tries to confirm or refute.
 	SubjectHypothesis SubjectKind = "hypothesis"
+	// SubjectCandidate is a rule match at a location, before anything has
+	// adjudicated it: "SEC-240 matched at config/app.go:41".
+	//
+	// It was missing from the first seven, and the omission is instructive. The
+	// other kinds were derived from the dependency-applicability chain — a
+	// package is affected, a symbol belongs to it, a path reaches it — which is
+	// the argument that motivated typed subjects in the first place. But that
+	// chain describes what nox reasons ABOUT, not what nox mostly PRODUCES. A
+	// pattern scanner's primary object is the candidate match, and every claim
+	// a refiner makes ("this match lies in a comment", "this value is a
+	// placeholder", "this is a bare prefix with no token body") is a claim
+	// about one.
+	//
+	// A candidate is deliberately not a Finding. A finding is an adjudicated
+	// output; a candidate is the observation that may or may not become one,
+	// and the whole point of recording claims against it is that some
+	// candidates are refuted and therefore never become findings at all. Those
+	// are exactly the ones whose reasoning used to vanish.
+	SubjectCandidate SubjectKind = "candidate"
 )
 
 // validSubjectKinds is the closed set. An unrecognised kind is not silently
@@ -63,6 +82,7 @@ var validSubjectKinds = map[SubjectKind]bool{
 	SubjectInput:      true,
 	SubjectControl:    true,
 	SubjectHypothesis: true,
+	SubjectCandidate:  true,
 }
 
 // Valid reports whether k is a defined subject kind.
