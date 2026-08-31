@@ -69,6 +69,34 @@ const (
 	// candidates are refuted and therefore never become findings at all. Those
 	// are exactly the ones whose reasoning used to vanish.
 	SubjectCandidate SubjectKind = "candidate"
+
+	// The reproduction hierarchy. Reproducing something is not reproducing
+	// everything, and these exist so a claim says WHICH.
+	//
+	// An integer overflow that reproduces establishes that the trigger
+	// condition fires. It does not establish that memory was corrupted, that a
+	// security property was violated, or that the bug is exploitable — those
+	// are strictly later propositions with their own evidence. Without separate
+	// subjects, a controlled reproduction of the cheapest one satisfies the
+	// deterministic-evidence precondition for the most expensive, because
+	// aggregation is per-subject and everything unattributed shares the zero
+	// subject.
+
+	// SubjectTriggerCondition — the input condition that reaches the defect
+	// fires. The weakest thing a reproduction can establish.
+	SubjectTriggerCondition SubjectKind = "trigger_condition"
+	// SubjectInvariantViolation — a stated security invariant was broken. A
+	// trigger firing is not yet this.
+	SubjectInvariantViolation SubjectKind = "invariant_violation"
+	// SubjectCrash — the target stopped. A crash is a symptom and may be
+	// neither a security property nor exploitable.
+	SubjectCrash SubjectKind = "crash"
+	// SubjectSecurityEffect — a concrete security consequence was observed:
+	// data disclosed, a control bypassed, privilege gained.
+	SubjectSecurityEffect SubjectKind = "security_effect"
+	// SubjectExploit — the full hypothesis was demonstrated end to end. The
+	// strongest, and the one nothing below it may stand in for.
+	SubjectExploit SubjectKind = "exploit"
 )
 
 // validSubjectKinds is the closed set. An unrecognised kind is not silently
@@ -83,6 +111,12 @@ var validSubjectKinds = map[SubjectKind]bool{
 	SubjectControl:    true,
 	SubjectHypothesis: true,
 	SubjectCandidate:  true,
+
+	SubjectTriggerCondition:   true,
+	SubjectInvariantViolation: true,
+	SubjectCrash:              true,
+	SubjectSecurityEffect:     true,
+	SubjectExploit:            true,
 }
 
 // Valid reports whether k is a defined subject kind.

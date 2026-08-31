@@ -34,6 +34,30 @@ type RunOutcome struct {
 	TargetErrors int `json:"target_errors"`
 }
 
+// DeriveExploitabilityAbout is DeriveExploitability scoped to the proposition
+// being decided.
+//
+// CONFIRMED requires deterministic evidence ABOUT that proposition, not
+// deterministic evidence somewhere in the ledger. Reproducing a trigger
+// condition is not reproducing an exploit, and without a subject the two are
+// indistinguishable: every unattributed claim shares the zero subject, so a run
+// that attributes nothing puts all its evidence in one bag where the cheapest
+// claim satisfies the precondition for the most expensive.
+//
+// DeriveExploitability delegates here with the zero subject, which is exactly
+// the old behaviour for a ledger whose claims are unattributed, and the honest
+// behaviour for one whose claims are typed: an unattributed run confirms only
+// on unattributed evidence.
+func DeriveExploitabilityAbout(o RunOutcome, l *Ledger, about Subject) Exploitability {
+	return deriveExploitability(o, l, about)
+}
+
+// DeriveExploitability maps a run outcome and its evidence ledger onto the
+// lifecycle state, scoped to the unattributed subject.
+func DeriveExploitability(o RunOutcome, l *Ledger) Exploitability {
+	return deriveExploitability(o, l, Subject{})
+}
+
 // DeriveExploitability maps a run outcome and its evidence ledger onto the
 // lifecycle state.
 //
@@ -50,7 +74,7 @@ type RunOutcome struct {
 //     confidence).
 //   - Without execution, the state is PLAUSIBLE if a hypothesis exists and
 //     POTENTIAL otherwise.
-func DeriveExploitability(o RunOutcome, l *Ledger) Exploitability {
+func deriveExploitability(o RunOutcome, l *Ledger, about Subject) Exploitability {
 	if !o.Executed {
 		if o.HypothesisConstructed {
 			return Plausible
@@ -66,7 +90,7 @@ func DeriveExploitability(o RunOutcome, l *Ledger) Exploitability {
 			return Inconclusive
 		case !o.Reproduced:
 			return Inconclusive
-		case l == nil || !l.HasDeterministic():
+		case l == nil || !l.HasDeterministicAbout(about):
 			// Something judged this a violation, but nothing machine-checkable
 			// backs it. That is a lead, not a proof.
 			return Inconclusive

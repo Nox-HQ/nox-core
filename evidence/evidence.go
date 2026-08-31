@@ -333,6 +333,30 @@ func (l *Ledger) HasDeterministic() bool {
 	return false
 }
 
+// HasDeterministicAbout reports whether the ledger holds live deterministic
+// evidence ABOUT s specifically.
+//
+// HasDeterministic is subject-blind, and for CONFIRMED that is too weak.
+// Reproducing something is not reproducing everything: an integer overflow that
+// fires establishes that the trigger condition holds, not that a security
+// invariant was violated or that the bug is exploitable. Those are strictly
+// later propositions, and a deterministic claim about the cheapest one would
+// otherwise satisfy the precondition for the most expensive — because every
+// unattributed claim shares the zero subject, so an attack run that attributes
+// nothing puts all its evidence in one bag where everything matches everything.
+//
+// The subject-blind form is kept: "does this ledger contain deterministic
+// evidence at all" is a real question for labelling a verdict, and it is not
+// the question CONFIRMED is asking.
+func (l *Ledger) HasDeterministicAbout(s Subject) bool {
+	for _, c := range l.Claims {
+		if c.Subject == s && c.Live() && c.Kind.Deterministic() {
+			return true
+		}
+	}
+	return false
+}
+
 // HasSemantic reports whether any claim is an LLM judgment. Consumers use this
 // to label a verdict as partly semantic.
 func (l *Ledger) HasSemantic() bool {
