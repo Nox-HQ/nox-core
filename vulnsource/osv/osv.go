@@ -427,6 +427,16 @@ func Ecosystem(eco string) (string, bool) {
 		return "Maven", true
 	case "nuget":
 		return "NuGet", true
+	// The three below were parsed by the CLI for a long time and never
+	// queried: an ecosystem missing here is filtered out of the batch
+	// silently, so a composer.lock project reported zero advisories with no
+	// degradation to say why. The OSV names are the ones its schema lists.
+	case "composer", "packagist":
+		return "Packagist", true
+	case "pub":
+		return "Pub", true
+	case "hex":
+		return "Hex", true
 	default:
 		return "", false
 	}

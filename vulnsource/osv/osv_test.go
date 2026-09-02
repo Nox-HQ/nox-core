@@ -329,3 +329,23 @@ func TestQueryOSV_WarnsOnNon200(t *testing.T) {
 		t.Errorf("expected a WARN about under-reporting, got: %q", logged)
 	}
 }
+
+// Every ecosystem a nox lockfile parser emits must map, or its packages are
+// filtered out of the batch query without a trace. "composer" was parsed for
+// a long time and never queried.
+func TestEcosystem_ParsedEcosystemsAllMap(t *testing.T) {
+	want := map[string]string{
+		"go": "Go", "npm": "npm", "pypi": "PyPI", "rubygems": "RubyGems",
+		"cargo": "crates.io", "maven": "Maven", "gradle": "Maven", "nuget": "NuGet",
+		"composer": "Packagist", "packagist": "Packagist", "pub": "Pub", "hex": "Hex",
+	}
+	for in, exp := range want {
+		got, ok := Ecosystem(in)
+		if !ok || got != exp {
+			t.Errorf("Ecosystem(%q) = %q, %v; want %q, true", in, got, ok, exp)
+		}
+	}
+	if _, ok := Ecosystem("docker"); ok {
+		t.Errorf("Ecosystem(docker) must stay unmapped: OSV rejects the whole batch on an unknown ecosystem")
+	}
+}
