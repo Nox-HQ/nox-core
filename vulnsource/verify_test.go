@@ -17,6 +17,9 @@ type fakeSource struct {
 	// that reached the network and failed.
 	deg     *degrade.Degradations
 	degKind degrade.Kind
+	// unreachable makes the source degrade like a real one on a network
+	// failure: a degradation and an empty answer, no error, no records.
+	unreachable bool
 }
 
 func (f *fakeSource) Name() string { return f.name }
@@ -27,6 +30,9 @@ func (f *fakeSource) Lookup(_ context.Context, qs []Query) (map[int][]Record, er
 	}
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.unreachable {
+		return map[int][]Record{}, nil
 	}
 	out := make(map[int][]Record)
 	for i, q := range qs {
@@ -52,7 +58,15 @@ func queries(names ...string) []Query {
 }
 
 func verifying(intel, ref *fakeSource, deg *degrade.Degradations) *VerifyingSource {
-	return NewVerifying(intel, func(rd *degrade.Degradations) Source {
+	return NewVerifying(func(id *degrade.Degradations) Source {
+		// A fake with unreachable set behaves like osv.Source on a network
+		// error: it records a degradation on the collector it was built with
+		// and answers nothing, rather than returning an error.
+		if intel.unreachable {
+			intel.deg, intel.degKind = id, degrade.OSV
+		}
+		return intel
+	}, func(rd *degrade.Degradations) Source {
 		ref.deg, ref.degKind = nil, ""
 		if ref.err != nil {
 			ref.deg, ref.degKind = rd, degrade.OSV
@@ -258,5 +272,106 @@ func TestVerifying_DiscrepanciesAreOrdered(t *testing.T) {
 	}
 	if first[0].Query.Name != "alpha" || first[0].VulnID != "GHSA-aaa" {
 		t.Errorf("first discrepancy = %+v, want alpha/GHSA-aaa", first[0])
+	}
+}
+
+// The case the release E2E hit: an intelligence source that reached the
+// network and failed answers with an empty map and a degradation — the way
+// osv.Source degrades — and that silence was classified as withholding every
+// record the reference published. An unreachable source withheld nothing. The
+// reference answers in its place, the run is unchecked, and the degradation
+// says "unreachable", never "cannot be trusted to report completely".
+func TestVerifying_UnreachableIntelIsNotASuppression(t *testing.T) {
+	intel := &fakeSource{name: "nox-intel", unreachable: true}
+	ref := &fakeSource{name: "osv.dev", recs: map[string][]Record{"lodash": {rec("GHSA-aaa")}}}
+	deg := &degrade.Degradations{}
+
+	v := verifying(intel, ref, deg)
+	got, err := v.Lookup(context.Background(), queries("lodash"))
+	if err != nil {
+		t.Fatalf("Lookup should answer from the reference: %v", err)
+	}
+	if len(got[0]) != 1 || got[0][0].ID != "GHSA-aaa" {
+		t.Errorf("the reference's answer was lost: %+v", got)
+	}
+
+	res := v.Verification()
+	if res.Checked {
+		t.Error("Checked is true although the intelligence source never answered")
+	}
+	if len(res.Suppressed) != 0 {
+		t.Errorf("an unreachable source was reported as suppressing: %+v", res.Suppressed)
+	}
+
+	kinds := map[degrade.Kind]int{}
+	for _, d := range deg.Items() {
+		kinds[d.Kind]++
+	}
+	if kinds[degrade.IntelSuppression] != 0 {
+		t.Error("an unreachable source was reported as a suppression")
+	}
+	if kinds[degrade.IntelUnreachable] != 1 {
+		t.Errorf("unreachable source not reported exactly once: %v", kinds)
+	}
+	if kinds[degrade.OSV] != 0 {
+		t.Error("the reference answered, so 'under-reported' is false and must not be said")
+	}
+}
+
+// A partial outage — the source answered some batches and failed one — keeps
+// what it did return. The reference fills in; nothing is classified.
+func TestVerifying_PartiallyUnreachableIntelKeepsWhatItReturned(t *testing.T) {
+	intel := &fakeSource{name: "nox-intel", unreachable: true}
+	// unreachable answers nothing, so stand in a source that answers one
+	// candidate and still degrades: wrap by pre-recording the degradation.
+	intel.unreachable = false
+	intel.recs = map[string][]Record{"lodash": {candidate("NOX-2026-1")}}
+	ref := &fakeSource{name: "osv.dev", recs: map[string][]Record{"lodash": {rec("GHSA-aaa")}}}
+	deg := &degrade.Degradations{}
+	v := NewVerifying(func(id *degrade.Degradations) Source {
+		intel.deg, intel.degKind = id, degrade.OSV
+		return intel
+	}, func(*degrade.Degradations) Source { return ref }, deg)
+
+	got, err := v.Lookup(context.Background(), queries("lodash"))
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	ids := idSet(got[0])
+	if _, ok := ids["NOX-2026-1"]; !ok {
+		t.Errorf("the intelligence source's own record was dropped: %+v", got)
+	}
+	if _, ok := ids["GHSA-aaa"]; !ok {
+		t.Errorf("the reference's record was not filled in: %+v", got)
+	}
+	if v.Verification().Checked {
+		t.Error("a degraded source cannot be verified")
+	}
+}
+
+// Nobody answered: the one case that really is an under-report, said in the
+// reference's own words rather than as a suppression or an unverified run.
+func TestVerifying_BothUnreachableIsAnUnderReport(t *testing.T) {
+	intel := &fakeSource{name: "nox-intel", unreachable: true}
+	ref := &fakeSource{name: "osv.dev", err: errors.New("network unreachable")}
+	deg := &degrade.Degradations{}
+
+	got, err := verifying(intel, ref, deg).Lookup(context.Background(), queries("lodash"))
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if len(got[0]) != 0 {
+		t.Errorf("records appeared from nowhere: %+v", got)
+	}
+	var osv, other int
+	for _, d := range deg.Items() {
+		if d.Kind == degrade.OSV {
+			osv++
+		} else {
+			other++
+		}
+	}
+	if osv != 1 || other != 0 {
+		t.Errorf("want exactly one under-report degradation, got %+v", deg.Items())
 	}
 }

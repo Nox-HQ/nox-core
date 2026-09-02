@@ -82,6 +82,17 @@ const (
 	// error as reporting an unexercised check as an all-clear.
 	IntelUnverified Kind = "intel_unverified"
 
+	// IntelUnreachable means the intelligence source could not be reached, so
+	// the scan was answered by the reference alone — exactly the lookup nox ran
+	// before an intelligence source was the default.
+	//
+	// This is deliberately not IntelSuppression. A source that never answered
+	// withheld nothing; calling its silence a suppression would tell an
+	// operator behind a proxy that their source "cannot be trusted to report
+	// completely" when the truth is that it was not consulted. What is lost is
+	// only what the richer source would have added, and that is what is said.
+	IntelUnreachable Kind = "intel_unreachable"
+
 	// IntelContribution means this installation was configured to contribute
 	// observations and could not. The scan's own findings are unaffected — the
 	// network simply learned nothing from this run, which is worth saying so

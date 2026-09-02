@@ -36,6 +36,14 @@ type VerifyingSource struct {
 	intel     Source
 	reference Source
 
+	// intelDeg collects the intelligence source's own degradations, for the
+	// same reason refDeg is separate: a source that reached the network and
+	// failed answers with an empty map and a degradation, not an error, and
+	// without its own collector that empty answer is indistinguishable from
+	// one that withheld every record. An unreachable source is reported as
+	// unreachable, and the reference answers in its place.
+	intelDeg *degrade.Degradations
+
 	// refDeg collects the reference source's own degradations, kept separate
 	// from the scan's collector on purpose. When the reference fails, the
 	// intelligence source may have answered perfectly — the honest impact is
@@ -93,17 +101,20 @@ func (v Verification) SuppressionRate() float64 {
 	return float64(len(v.Suppressed)) / float64(total)
 }
 
-// NewVerifying returns a Source that answers from intel and checks it against a
-// reference built by newReference.
+// NewVerifying returns a Source that answers from the intelligence source built
+// by newIntel and checks it against the reference built by newReference.
 //
-// The reference is built rather than passed so the VerifyingSource owns its
-// degradation collector, which is what lets it tell "the reference disagreed"
-// from "the reference never answered". deg may be nil.
-func NewVerifying(intel Source, newReference func(*degrade.Degradations) Source, deg *degrade.Degradations) *VerifyingSource {
+// Both sources are built rather than passed so the VerifyingSource owns their
+// degradation collectors, which is what lets it tell "the reference disagreed"
+// from "the reference never answered" — and "the intelligence source withheld
+// a record" from "the intelligence source never answered". deg may be nil.
+func NewVerifying(newIntel, newReference func(*degrade.Degradations) Source, deg *degrade.Degradations) *VerifyingSource {
+	intelDeg := &degrade.Degradations{}
 	refDeg := &degrade.Degradations{}
 	return &VerifyingSource{
-		intel:     intel,
+		intel:     newIntel(intelDeg),
 		reference: newReference(refDeg),
+		intelDeg:  intelDeg,
 		refDeg:    refDeg,
 		deg:       deg,
 	}
@@ -148,10 +159,35 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 	if intelOut == nil {
 		intelOut = make(map[int][]Record)
 	}
+	refFailed := refErr != nil || v.refDeg.Len() > 0
+
+	// An intelligence source that reached the network and failed answered
+	// nothing, and nothing is not a suppression. The reference answers in its
+	// place — the lookup nox ran before intelligence was the default — and
+	// whatever the intelligence source did return is kept, so a partial
+	// outage costs only what the richer source would have added.
+	if v.intelDeg.Len() > 0 {
+		detail := v.intelDeg.Items()[0].Detail
+		if refFailed {
+			// Nobody answered. This is the one case that is an under-report,
+			// and it is said in the reference's own words.
+			v.deg.Add(degrade.OSV,
+				fmt.Sprintf("%s unreachable (%s) and %s also failed", v.intel.Name(), detail, v.reference.Name()),
+				"dependency vulnerabilities are under-reported; this scan cannot confirm the absence of known CVEs")
+		} else {
+			v.deg.Add(degrade.IntelUnreachable,
+				fmt.Sprintf("%s unreachable (%s); answered by %s alone", v.intel.Name(), detail, v.reference.Name()),
+				fmt.Sprintf("this scan is exactly the %s lookup nox runs without an intelligence source; "+
+					"nothing was withheld, and nothing the %s source would have added is included",
+					v.reference.Name(), v.intel.Name()))
+		}
+		v.setResult(Verification{Checked: false})
+		return union(intelOut, refOut), nil
+	}
 
 	// The reference is the checker, not the answerer. It failing means the
 	// check did not happen — which must be said, not assumed away.
-	if refErr != nil || v.refDeg.Len() > 0 {
+	if refFailed {
 		detail := "reference source unavailable"
 		if refErr != nil {
 			detail = fmt.Sprintf("reference source failed: %v", refErr)
@@ -211,6 +247,21 @@ func (v *VerifyingSource) setResult(r Verification) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.result = r
+}
+
+// union merges the reference's records into the intelligence source's answer
+// without classifying the difference — used when the difference means nothing
+// because one side never answered.
+func union(intelOut, refOut map[int][]Record) map[int][]Record {
+	for i, refs := range refOut {
+		have := idSet(intelOut[i])
+		for _, r := range refs {
+			if _, ok := have[r.ID]; !ok {
+				intelOut[i] = append(intelOut[i], r)
+			}
+		}
+	}
+	return intelOut
 }
 
 func idSet(recs []Record) map[string]struct{} {
