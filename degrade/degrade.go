@@ -120,7 +120,31 @@ type Degradation struct {
 	// Impact states, in the operator's terms, what may now be missing from
 	// the results. This is the field that answers "should I trust this scan?".
 	Impact string
+
+	// Advisory marks a degradation that reports capability the operator did NOT
+	// ask for, as opposed to something they rely on that did not run.
+	//
+	// Both are worth reporting and only one is worth failing a build over, and
+	// nothing here distinguished them. A CI gate counting entries therefore
+	// failed builds on the inverse of the condition it existed for: nox raises
+	// a plugin degradation listing installed plugins that are NOT in
+	// plugins.required, so a runner with an undeclared plugin failed the gate
+	// having asked for nothing. Observed in klarlabs-studio/.github#80.
+	//
+	// The zero value is BLOCKING, deliberately. A degradation nobody classified
+	// is one nobody thought about, and the safe reading of "did not check" is
+	// that it matters. Marking one advisory is an assertion the producer has to
+	// make on purpose.
+	Advisory bool
 }
+
+// Blocks reports whether this degradation should fail a build.
+//
+// It exists so consumers stop deciding by inspecting Impact text. nox's CI gate
+// matched on a substring of the impact sentence, which worked and was a seam
+// rather than a design — the sentence is written for a person to read, and the
+// first rewording would have silently re-broken the gate.
+func (d Degradation) Blocks() bool { return !d.Advisory }
 
 // String renders a degradation as a single diagnostic line.
 func (d Degradation) String() string {
@@ -146,6 +170,23 @@ func (d *Degradations) Add(kind Kind, detail, impact string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.items = append(d.items, Degradation{Kind: kind, Detail: detail, Impact: impact})
+}
+
+// AddAdvisory records a degradation that reports capability the operator did
+// not ask for. It is safe to call concurrently, and on a nil receiver.
+//
+// A separate method rather than a parameter on Add, so every existing call site
+// keeps the blocking default without being touched — and so choosing advisory
+// reads as a decision at the site that makes it.
+func (d *Degradations) AddAdvisory(kind Kind, detail, impact string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.items = append(d.items, Degradation{
+		Kind: kind, Detail: detail, Impact: impact, Advisory: true,
+	})
 }
 
 // Items returns the collected degradations in a deterministic order: by kind,
