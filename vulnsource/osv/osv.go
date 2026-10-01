@@ -27,6 +27,9 @@ const DefaultBaseURL = "https://api.osv.dev"
 // batchLimit is the maximum number of queries per OSV batch request.
 const batchLimit = 1000
 
+// batchConcurrency is how many batch requests are in flight at once.
+const batchConcurrency = 4
+
 // hydrateConcurrency bounds in-flight detail lookups so a large dependency tree
 // does not open hundreds of simultaneous connections to OSV.
 const hydrateConcurrency = 8
@@ -131,11 +134,15 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 		}
 	}
 
+	// Build every request body first, so a marshalling error still fails the
+	// lookup before anything is sent.
+	type batchJob struct {
+		items []indexed
+		body  []byte
+	}
+	var jobs []batchJob
 	for start := 0; start < len(queryable); start += batchLimit {
-		end := start + batchLimit
-		if end > len(queryable) {
-			end = len(queryable)
-		}
+		end := min(start+batchLimit, len(queryable))
 		batch := queryable[start:end]
 
 		queries := make([]Query, len(batch))
@@ -154,42 +161,54 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 		if err != nil {
 			return nil, fmt.Errorf("marshalling OSV request: %w", err)
 		}
+		jobs = append(jobs, batchJob{items: batch, body: body})
+	}
 
-		url := strings.TrimRight(s.baseURL, "/") + "/v1/querybatch"
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
+	// The batches are independent, so they are sent together, at most
+	// batchConcurrency at a time: a monorepo with thousands of packages waits
+	// for one batch's latency rather than one per thousand packages. A batch
+	// that fails costs only its own queries -- the others' answers are kept --
+	// and is recorded with the number of packages it left unchecked. (Sent one
+	// after another, the first failure ended the lookup and lost every later
+	// batch as well.)
+	url := strings.TrimRight(s.baseURL, "/") + "/v1/querybatch"
+	// A request that cannot even be built (a malformed base URL) is a
+	// configuration error, not a lookup that failed: it fails the lookup, as it
+	// always has, rather than degrading every batch.
+	if len(jobs) > 0 {
+		if _, err := http.NewRequestWithContext(ctx, http.MethodPost, url, http.NoBody); err != nil {
 			return nil, fmt.Errorf("creating OSV request: %w", err)
 		}
-		req.Header.Set("Content-Type", "application/json")
+	}
+	answers := make([][]BatchResult, len(jobs))
+	failures := make([]error, len(jobs))
+	sem := make(chan struct{}, batchConcurrency)
+	var wg sync.WaitGroup
+	for j := range jobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			answers[j], failures[j] = s.queryBatch(ctx, url, jobs[j].body)
+		}()
+	}
+	wg.Wait()
 
-		resp, err := s.client.Do(req)
-		if err != nil {
-			// Network error — degrade gracefully, but say so: a silent empty
-			// result is indistinguishable from "no vulnerabilities found".
+	for j, job := range jobs {
+		if err := failures[j]; err != nil {
+			// Degrade gracefully, but say so: a silent empty result is
+			// indistinguishable from "no vulnerabilities found".
 			slog.WarnContext(ctx, "OSV query failed; dependency vulnerabilities may be under-reported",
-				"error", err, "queries", len(queries))
+				"error", err, "queries", len(job.items))
 			s.deg.Add(degrade.OSV,
-				fmt.Sprintf("vulnerability lookup failed for %d packages: %v", len(queries), err),
+				fmt.Sprintf("vulnerability lookup failed for %d packages: %v", len(job.items), err),
 				"dependency vulnerabilities are under-reported; this scan cannot confirm the absence of known CVEs")
-			return result, nil
+			continue
 		}
-
-		vulns, decodeErr := decodeBatchResponse(resp)
-		_ = resp.Body.Close()
-		if decodeErr != nil {
-			// Non-200 status or undecodable body — same risk: don't report a
-			// clean scan when the lookup actually failed.
-			slog.WarnContext(ctx, "OSV query returned an error; dependency vulnerabilities may be under-reported",
-				"error", decodeErr, "queries", len(queries))
-			s.deg.Add(degrade.OSV,
-				fmt.Sprintf("vulnerability lookup failed for %d packages: %v", len(queries), decodeErr),
-				"dependency vulnerabilities are under-reported; this scan cannot confirm the absence of known CVEs")
-			return result, nil
-		}
-
-		for i, br := range vulns {
-			if len(br.Vulns) > 0 {
-				result[batch[i].orig] = br.Vulns
+		for i, br := range answers[j] {
+			if i < len(job.items) && len(br.Vulns) > 0 {
+				result[job.items[i].orig] = br.Vulns
 			}
 		}
 	}
@@ -206,6 +225,22 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 	}
 
 	return result, nil
+}
+
+// queryBatch sends one /v1/querybatch request. A transport error, a non-200
+// status and an undecodable body are all failures of that batch.
+func (s *Source) queryBatch(ctx context.Context, url string, body []byte) ([]BatchResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating OSV request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return decodeBatchResponse(resp)
 }
 
 // HydrateDetails fills in the fields /v1/querybatch does not return.
