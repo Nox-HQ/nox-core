@@ -3,7 +3,7 @@
 // are unregistered, and assembles the claimable, high-likelihood ones into a
 // slopfeed.Feed.
 //
-// It is the library form of nox's former cmd/slopfeed, so a scheduler (the
+// It is the library form of nox's cmd/slopfeed, so a scheduler (the
 // nox-intelligence service) can run it without depending on the scanner. The
 // candidate model, the selection quotas and the scoring are unchanged.
 //
