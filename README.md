@@ -1,7 +1,8 @@
 # nox-core
 
 The shared kernel of the NOX security tooling: the evidence spine, the
-vulnerability-source seam, and the degradation vocabulary.
+vulnerability-source seam, the degradation vocabulary, and the predictive
+slopsquat feed.
 
 It exists so that `nox` (the open-source scanner) and `nox-intelligence` (the
 hosted service) can share these definitions **without depending on each other**.
@@ -15,6 +16,8 @@ Before this module, the service imported the scanner through a local
 | `evidence` | the proposition model: typed subjects and the relations between them, evidence kinds and their strengths, supporting and refuting claims, claim lifecycle, producer authority, the exploitability lifecycle, and confidence aggregation |
 | `vulnsource` | the vulnerability-source seam and the OSV-compatible wire format, including NOX's superset extensions |
 | `degrade` | the vocabulary for "this check could not complete" |
+| `slopfeed` | the predictive slopsquat feed format (`slopsquat-blocklist/v1`): canonical encoding, digest, Ed25519 signing and verification, lookup. Pure |
+| `slopfeed/generate` | the feed generator: the LLM-hallucination candidate model, its scoring, and the read-only, rate-limited registry checker |
 
 `evidence` is the reason this module exists. One definition of CONFIRMED, in one
 place, is the only way the scanner and the service cannot drift apart about what
@@ -74,6 +77,16 @@ schema, which anyone may implement independently, but `Record.Intelligence`
 superset extensions. Two definitions of those would stop round-tripping without
 saying so.
 
+`slopfeed` is shared because the service generates and signs the feed and the
+scanner verifies it, and both must produce the same canonical bytes or every
+signature fails. Like `evidence` it is pure — no I/O, no clock, no randomness;
+reading a feed file, fetching one over HTTPS and caching it belong to the
+caller. `slopfeed/generate` is kept apart because it does touch the network:
+its registry checker sits behind an injectable HTTP client, clock and sleep, so
+the pure part stays pure and the generator can be tested offline. The scanner
+needs only `slopfeed`; the service needs both. Fixtures written by nox's own
+implementation pin that the move changed no bytes.
+
 ## Stability
 
 Both consumers pin a released version. Changes here are breaking changes for
@@ -93,3 +106,8 @@ the scanner without the rights to do so.
 Extracted from `nox-hq/nox` at commit `703b105` on main, not from the `v1.30.1`
 tag: `vulnsource`'s superset model (`status.go`, `verify.go`, `match.go`) landed
 after that release. `evidence` and `degrade` are unchanged since `v1.30.1`.
+
+`slopfeed` and `slopfeed/generate` were extracted from `nox-hq/nox` `v1.48.2`
+(commit `29a9246`): `core/analyzers/slop/feed` and `cmd/slopfeed`. The remote
+fetch and cache and the bundled feed stayed in nox, the only party that uses
+them.
