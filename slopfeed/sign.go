@@ -17,6 +17,7 @@ const (
 	pemTypeRawPublic  = "ED25519 PUBLIC KEY"
 	pemTypeRawPrivate = "ED25519 PRIVATE KEY"
 	pemTypePKCS8      = "PRIVATE KEY"
+	pemTypePKIX       = "PUBLIC KEY"
 )
 
 // Sign recomputes the feed's digest and attaches an Ed25519 signature over the
@@ -82,8 +83,13 @@ func Ed25519Verifier(pub ed25519.PublicKey) SignatureVerifier {
 	}
 }
 
-// PEMEd25519Verifier builds an Ed25519Verifier from a PEM-encoded public key
-// whose body is the raw 32-byte key, the form EncodePublicKeyPEM writes.
+// PEMEd25519Verifier builds an Ed25519Verifier from a PEM-encoded public key in
+// either form an operator is likely to hold:
+//
+//   - a raw 32-byte key body, the form EncodePublicKeyPEM (and so the
+//     generator's published public key) writes;
+//   - PKIX ("PUBLIC KEY"), what `openssl pkey -pubout` writes, and what nox's
+//     documentation tells operators to produce.
 func PEMEd25519Verifier(pemData []byte) (SignatureVerifier, error) {
 	block, _ := pem.Decode(pemData)
 	if block == nil {
@@ -91,6 +97,17 @@ func PEMEd25519Verifier(pemData []byte) (SignatureVerifier, error) {
 	}
 	if len(block.Bytes) == ed25519.PublicKeySize {
 		return Ed25519Verifier(ed25519.PublicKey(block.Bytes)), nil
+	}
+	if block.Type == pemTypePKIX {
+		key, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing PKIX public key: %w", err)
+		}
+		pub, ok := key.(ed25519.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("public key is not Ed25519 (got %T)", key)
+		}
+		return Ed25519Verifier(pub), nil
 	}
 	return nil, fmt.Errorf("unexpected public key length: %d", len(block.Bytes))
 }
