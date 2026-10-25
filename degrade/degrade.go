@@ -93,6 +93,17 @@ const (
 	// only what the richer source would have added, and that is what is said.
 	IntelUnreachable Kind = "intel_unreachable"
 
+	// IntelIncomplete means the intelligence source answered, but told the
+	// client its answer for some packages was not exhaustive (a truncated
+	// advisory list, or an ecosystem it never asked its reference about).
+	//
+	// This is neither IntelUnreachable (it answered) nor IntelSuppression (it
+	// withheld nothing it knew of, and said so). What it shares with both is
+	// the hazard: an empty or short advisory list for these packages is "not
+	// fully checked", never "no vulnerabilities". Blocking, like every
+	// degradation nobody classified as advisory.
+	IntelIncomplete Kind = "intel_incomplete"
+
 	// IntelContribution means this installation was configured to contribute
 	// observations and could not. The scan's own findings are unaffected — the
 	// network simply learned nothing from this run, which is worth saying so

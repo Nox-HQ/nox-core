@@ -161,13 +161,18 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 	}
 	refFailed := refErr != nil || v.refDeg.Len() > 0
 
+	// A partial answer is not a failed one. The source reached us and told us
+	// what it did not cover; that is forwarded as its own degradation, and
+	// must not be mistaken below for the source being unreachable.
+	unreachable := v.forwardIncomplete()
+
 	// An intelligence source that reached the network and failed answered
 	// nothing, and nothing is not a suppression. The reference answers in its
 	// place — the lookup nox ran before intelligence was the default — and
 	// whatever the intelligence source did return is kept, so a partial
 	// outage costs only what the richer source would have added.
-	if v.intelDeg.Len() > 0 {
-		detail := v.intelDeg.Items()[0].Detail
+	if len(unreachable) > 0 {
+		detail := unreachable[0].Detail
 		if refFailed {
 			// Nobody answered. This is the one case that is an under-report,
 			// and it is said in the reference's own words.
@@ -241,6 +246,20 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 
 	v.setResult(result)
 	return intelOut, nil
+}
+
+// forwardIncomplete copies the intelligence source's IntelIncomplete
+// degradations to the scan and returns the rest, which are failures to answer.
+func (v *VerifyingSource) forwardIncomplete() []degrade.Degradation {
+	var rest []degrade.Degradation
+	for _, d := range v.intelDeg.Items() {
+		if d.Kind == degrade.IntelIncomplete {
+			v.deg.Add(d.Kind, d.Detail, d.Impact)
+			continue
+		}
+		rest = append(rest, d)
+	}
+	return rest
 }
 
 func (v *VerifyingSource) setResult(r Verification) {

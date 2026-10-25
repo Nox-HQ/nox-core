@@ -375,3 +375,30 @@ func TestVerifying_BothUnreachableIsAnUnderReport(t *testing.T) {
 		t.Errorf("want exactly one under-report degradation, got %+v", deg.Items())
 	}
 }
+
+// An intelligence source that answered but said so incompletely is not an
+// unreachable one. Treating its degradation as unreachability would discard the
+// verification the reference exists to provide.
+func TestVerifying_IncompleteAnswerIsNotUnreachable(t *testing.T) {
+	intel := &fakeSource{name: "nox-intel", recs: map[string][]Record{"lodash": {rec("GHSA-aaa")}}}
+	ref := &fakeSource{name: "osv.dev", recs: map[string][]Record{"lodash": {rec("GHSA-aaa")}}}
+	deg := &degrade.Degradations{}
+	v := NewVerifying(func(id *degrade.Degradations) Source {
+		intel.deg, intel.degKind = id, degrade.IntelIncomplete
+		return intel
+	}, func(*degrade.Degradations) Source { return ref }, deg)
+
+	if _, err := v.Lookup(context.Background(), queries("lodash")); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []degrade.Kind
+	for _, d := range deg.Items() {
+		kinds = append(kinds, d.Kind)
+	}
+	if len(kinds) != 1 || kinds[0] != degrade.IntelIncomplete {
+		t.Errorf("degradations = %v, want exactly [intel_incomplete]", kinds)
+	}
+	if !v.Verification().Checked {
+		t.Error("the reference check did not run because the source answered incompletely")
+	}
+}

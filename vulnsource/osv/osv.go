@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 
@@ -58,6 +59,77 @@ type BatchResponse struct {
 // BatchResult holds vulnerabilities for a single query.
 type BatchResult struct {
 	Vulns []vulnsource.Record `json:"vulns"`
+
+	// Coverage is NOX Intelligence's statement of how completely this query was
+	// checked, carried on the wire as nox_coverage. OSV.dev does not send it, so
+	// it is nil for a plain OSV response; a nil Coverage is "unreported", which
+	// is not the same as "complete" (see Completeness).
+	Coverage *Coverage `json:"nox_coverage,omitempty"`
+}
+
+// CoverageStatus says how much of the reference database one query was checked
+// against. The values are the service's wire vocabulary.
+type CoverageStatus string
+
+const (
+	// CoverageComplete means the service answered the query in full.
+	CoverageComplete CoverageStatus = "complete"
+	// CoverageIncomplete means the answer is partial: the advisories returned
+	// are real, there may be more.
+	CoverageIncomplete CoverageStatus = "incomplete"
+	// CoverageUnsupported means the service never asked its reference, because
+	// it has no vocabulary for the query's ecosystem.
+	CoverageUnsupported CoverageStatus = "unsupported"
+)
+
+// Coverage is the per-query completeness statement (nox_coverage).
+type Coverage struct {
+	Status CoverageStatus `json:"status"`
+	Reason string         `json:"reason,omitempty"`
+}
+
+// Completeness is a reading of a BatchResult's coverage that keeps "the source
+// said complete" apart from "the source said nothing".
+type Completeness int
+
+const (
+	// Unreported means the response carried no coverage statement, as every
+	// plain OSV.dev response does. Nothing was claimed either way, so callers
+	// must not read it as an explicit "complete" — and need not treat it as a
+	// failure, or every OSV.dev scan would be one.
+	Unreported Completeness = iota
+	// Complete means the service explicitly said the answer is exhaustive.
+	Complete
+	// Partial means the service said the answer is not exhaustive, or said
+	// something this client does not understand. An unknown status fails
+	// closed: a status added later must not be read as a clean answer.
+	Partial
+)
+
+// Completeness reports what this result says about its own completeness.
+// An empty status inside a present nox_coverage object is a malformed
+// statement and reads as Partial, not Unreported.
+func (r BatchResult) Completeness() Completeness {
+	switch {
+	case r.Coverage == nil:
+		return Unreported
+	case r.Coverage.Status == CoverageComplete:
+		return Complete
+	default:
+		return Partial
+	}
+}
+
+// partialReason renders why a Partial result is partial, for a degradation.
+func (c Coverage) partialReason() string {
+	reason := string(c.Status)
+	if reason == "" {
+		reason = "unspecified"
+	}
+	if c.Reason != "" {
+		reason += ": " + c.Reason
+	}
+	return reason
 }
 
 // Source queries an OSV-wire-protocol endpoint for known vulnerabilities.
@@ -195,6 +267,7 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 	}
 	wg.Wait()
 
+	var partial []partialQuery
 	for j, job := range jobs {
 		if err := failures[j]; err != nil {
 			// Degrade gracefully, but say so: a silent empty result is
@@ -207,11 +280,18 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 			continue
 		}
 		for i, br := range answers[j] {
-			if i < len(job.items) && len(br.Vulns) > 0 {
+			if i >= len(job.items) {
+				continue
+			}
+			if len(br.Vulns) > 0 {
 				result[job.items[i].orig] = br.Vulns
+			}
+			if br.Completeness() == Partial {
+				partial = append(partial, partialQuery{q: job.items[i].q, why: br.Coverage.partialReason()})
 			}
 		}
 	}
+	s.recordPartial(ctx, partial)
 
 	// /v1/querybatch returns only {id, modified}; fetch the detail that
 	// severity mapping and import-path scoping depend on. Each result slice is
@@ -225,6 +305,37 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 	}
 
 	return result, nil
+}
+
+type partialQuery struct {
+	q   vulnsource.Query
+	why string
+}
+
+// maxPartialListed bounds how many packages a degradation names, so a service
+// that answers a monorepo partially does not produce a megabyte of detail.
+const maxPartialListed = 20
+
+// recordPartial reports the packages the service said it did not fully check.
+// The list is sorted, so the degradation is identical on every run.
+func (s *Source) recordPartial(ctx context.Context, partial []partialQuery) {
+	if len(partial) == 0 {
+		return
+	}
+	lines := make([]string, len(partial))
+	for i, p := range partial {
+		lines[i] = fmt.Sprintf("%s/%s@%s (%s)", p.q.Ecosystem, p.q.Name, p.q.Version, p.why)
+	}
+	sort.Strings(lines)
+	shown := lines
+	if len(shown) > maxPartialListed {
+		shown = append(append([]string{}, lines[:maxPartialListed]...),
+			fmt.Sprintf("and %d more", len(lines)-maxPartialListed))
+	}
+	slog.WarnContext(ctx, "vulnerability source answered incompletely", "source", s.name, "queries", len(partial))
+	s.deg.Add(degrade.IntelIncomplete,
+		fmt.Sprintf("%s answered %d package(s) incompletely: %s", s.name, len(partial), strings.Join(shown, "; ")),
+		"an empty or short advisory list for these packages is not proof they are free of known vulnerabilities")
 }
 
 // queryBatch sends one /v1/querybatch request. A transport error, a non-200
