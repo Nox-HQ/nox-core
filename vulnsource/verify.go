@@ -206,11 +206,23 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 		return intelOut, nil
 	}
 
+	var partial map[int]struct{}
+	if pr, ok := v.intel.(PartialReporter); ok {
+		partial = pr.PartialQueries()
+	}
+
 	result := Verification{Checked: true}
 	for i, q := range qs {
 		have := idSet(intelOut[i])
+		_, truncated := partial[i]
 		for _, ref := range refOut[i] {
 			if _, ok := have[ref.ID]; ok {
+				continue
+			}
+			if truncated {
+				// The source said this answer was partial. Restoring what it
+				// did not return is right; calling that withholding is not.
+				intelOut[i] = append(intelOut[i], ref)
 				continue
 			}
 			result.Suppressed = append(result.Suppressed, Discrepancy{

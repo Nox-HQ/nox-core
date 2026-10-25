@@ -153,3 +153,87 @@ func TestLookup_CompleteAndPlainOSVRecordNothing(t *testing.T) {
 		}
 	}
 }
+
+// The service said its answer was incomplete (1 of 2 advisories); the reference
+// has both. The missing one is restored, and it is truncation, not withholding:
+// no intel_suppression. A source that omits silently is still caught (see the
+// vulnsource verifier tests).
+func TestVerifying_PartialQueryRestoredButNotCountedAsSuppression(t *testing.T) {
+	serve := func(wire string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/v1/vulns/") {
+				http.Error(w, "nope", http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write([]byte(wire))
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	intel := serve(`{"results":[{"vulns":[{"id":"GHSA-1"}],"nox_coverage":{"status":"incomplete","reason":"cap"}}]}`)
+	ref := serve(`{"results":[{"vulns":[{"id":"GHSA-1"},{"id":"GHSA-2"}]}]}`)
+
+	deg := &degrade.Degradations{}
+	v := vulnsource.NewVerifying(func(d *degrade.Degradations) vulnsource.Source {
+		return NewNamed("nox-intelligence", intel.URL, intel.Client(), d)
+	}, func(d *degrade.Degradations) vulnsource.Source {
+		return New(ref.URL, ref.Client(), d)
+	}, deg)
+	got, err := v.Lookup(context.Background(), npmQueries("a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got[0]) != 2 {
+		t.Errorf("got %d advisories, want both restored", len(got[0]))
+	}
+	kinds := map[degrade.Kind]int{}
+	for _, d := range deg.Items() {
+		kinds[d.Kind]++
+	}
+	if kinds[degrade.IntelSuppression] != 0 {
+		t.Errorf("truncation was reported as withholding: %v", kinds)
+	}
+	if kinds[degrade.IntelIncomplete] != 1 {
+		t.Errorf("intel_incomplete missing: %v", kinds)
+	}
+	if v.Verification().Suppressed != nil {
+		t.Errorf("Suppressed = %v", v.Verification().Suppressed)
+	}
+}
+
+// The same omission with a complete (or unreported) coverage is withholding.
+func TestVerifying_SilentOmissionStillSuppression(t *testing.T) {
+	for name, cov := range map[string]string{"complete": `,"nox_coverage":{"status":"complete"}`, "unreported": ``} {
+		serve := func(wire string) *httptest.Server {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/v1/vulns/") {
+					http.Error(w, "nope", http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(wire))
+			}))
+			t.Cleanup(srv.Close)
+			return srv
+		}
+		intel := serve(`{"results":[{"vulns":[{"id":"GHSA-1"}]` + cov + `}]}`)
+		ref := serve(`{"results":[{"vulns":[{"id":"GHSA-1"},{"id":"GHSA-2"}]}]}`)
+		deg := &degrade.Degradations{}
+		v := vulnsource.NewVerifying(func(d *degrade.Degradations) vulnsource.Source {
+			return NewNamed("nox-intelligence", intel.URL, intel.Client(), d)
+		}, func(d *degrade.Degradations) vulnsource.Source {
+			return New(ref.URL, ref.Client(), d)
+		}, deg)
+		if _, err := v.Lookup(context.Background(), npmQueries("a")); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		for _, d := range deg.Items() {
+			if d.Kind == degrade.IntelSuppression {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s: intel_suppression count = %d, want 1", name, n)
+		}
+	}
+}

@@ -139,6 +139,30 @@ type Source struct {
 	client  *http.Client
 	deg     *degrade.Degradations
 	cache   AdvisoryCache
+
+	// partial holds the query indices the most recent Lookup was told were
+	// answered incompletely. It is shared by copies made with WithCache.
+	partial *partialIndex
+}
+
+// partialIndex is the mutex-guarded set behind PartialQueries.
+type partialIndex struct {
+	mu  sync.Mutex
+	set map[int]struct{}
+}
+
+// PartialQueries returns the indices (into the slice passed to the most recent
+// Lookup) of queries the service said it answered incompletely. It implements
+// vulnsource.PartialReporter, which lets a verifier tell truncation from
+// withholding.
+func (s *Source) PartialQueries() map[int]struct{} {
+	out := make(map[int]struct{})
+	s.partial.mu.Lock()
+	defer s.partial.mu.Unlock()
+	for i := range s.partial.set {
+		out[i] = struct{}{}
+	}
+	return out
 }
 
 // WithCache returns a copy of the source that serves advisory detail from c.
@@ -170,7 +194,7 @@ func NewNamed(name, baseURL string, client *http.Client, deg *degrade.Degradatio
 	if name == "" {
 		name = "osv.dev"
 	}
-	return &Source{name: name, baseURL: baseURL, client: client, deg: deg}
+	return &Source{name: name, baseURL: baseURL, client: client, deg: deg, partial: &partialIndex{}}
 }
 
 // Name identifies this source in degradation records and provenance.
@@ -287,7 +311,7 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 				result[job.items[i].orig] = br.Vulns
 			}
 			if br.Completeness() == Partial {
-				partial = append(partial, partialQuery{q: job.items[i].q, why: br.Coverage.partialReason()})
+				partial = append(partial, partialQuery{idx: job.items[i].orig, q: job.items[i].q, why: br.Coverage.partialReason()})
 			}
 		}
 	}
@@ -308,6 +332,7 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 }
 
 type partialQuery struct {
+	idx int
 	q   vulnsource.Query
 	why string
 }
@@ -319,6 +344,13 @@ const maxPartialListed = 20
 // recordPartial reports the packages the service said it did not fully check.
 // The list is sorted, so the degradation is identical on every run.
 func (s *Source) recordPartial(ctx context.Context, partial []partialQuery) {
+	set := make(map[int]struct{}, len(partial))
+	for _, p := range partial {
+		set[p.idx] = struct{}{}
+	}
+	s.partial.mu.Lock()
+	s.partial.set = set
+	s.partial.mu.Unlock()
 	if len(partial) == 0 {
 		return
 	}
