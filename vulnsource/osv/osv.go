@@ -109,6 +109,12 @@ type Coverage struct {
 	MirrorSyncedAt string `json:"mirror_synced_at,omitempty"`
 }
 
+// MirrorOnlyNote is the phrase an intel_incomplete degradation's Detail carries
+// for a query answered from the service's mirror because live OSV was not
+// consulted. It is exported so a consumer can recognise that case by the
+// definition rather than by a copy of the sentence.
+const MirrorOnlyNote = "answered from the mirror only; live OSV was not consulted"
+
 // fromMirror reports whether the advisories came from the service's mirror
 // because live OSV was not consulted.
 func (c Coverage) fromMirror() bool {
@@ -168,7 +174,7 @@ func (c Coverage) partialReason() string {
 		notes = append(notes, c.Reason)
 	}
 	if c.fromMirror() {
-		note := "answered from the mirror only; live OSV was not consulted"
+		note := MirrorOnlyNote
 		if c.MirrorSyncedAt != "" {
 			note += " (mirror synced " + c.MirrorSyncedAt + ")"
 		}

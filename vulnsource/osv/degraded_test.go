@@ -80,7 +80,7 @@ func TestLookup_DegradedReasonsNameWhatWasMissing(t *testing.T) {
 		t.Fatalf("degradations = %+v", items)
 	}
 	for _, want := range []string{
-		"npm/a@1.0.0 (degraded: ", "answered from the mirror only; live OSV was not consulted", "mirror synced 2026-10-25T04:00:00Z",
+		"npm/a@1.0.0 (degraded: ", MirrorOnlyNote, "mirror synced 2026-10-25T04:00:00Z",
 		"npm/b@1.0.0 (unavailable: ecosystem not in the mirror",
 		"npm/c@1.0.0 (degraded: candidate store unreadable; NOX candidate store was not consulted",
 	} {
