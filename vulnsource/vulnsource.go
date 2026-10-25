@@ -178,3 +178,12 @@ type Source interface {
 	// Lookup resolves qs to hydrated records, keyed by index into qs.
 	Lookup(ctx context.Context, qs []Query) (map[int][]Record, error)
 }
+
+// PartialReporter is an optional interface for a Source that can say which
+// queries of its most recent Lookup it answered incompletely. A verifier uses it
+// to tell a truncated answer from a withheld one: records the reference adds
+// for a partial query are restored, but not counted as suppression. Sources that
+// do not implement it are verified exactly as before.
+type PartialReporter interface {
+	PartialQueries() map[int]struct{}
+}
