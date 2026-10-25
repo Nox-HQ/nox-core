@@ -80,12 +80,54 @@ const (
 	// CoverageUnsupported means the service never asked its reference, because
 	// it has no vocabulary for the query's ecosystem.
 	CoverageUnsupported CoverageStatus = "unsupported"
+	// CoverageDegraded means the answer was assembled from fewer sources than a
+	// full one (Coverage.Missing names them). The advisories returned are real.
+	CoverageDegraded CoverageStatus = "degraded"
+	// CoverageUnavailable means no source could answer the query; an empty list
+	// for it is not "no advisories".
+	CoverageUnavailable CoverageStatus = "unavailable"
+)
+
+// Sources a Coverage can report as not consulted (Coverage.Missing).
+const (
+	MissingOSVLive       = "osv_live"
+	MissingNoxCandidates = "nox_candidates"
 )
 
 // Coverage is the per-query completeness statement (nox_coverage).
 type Coverage struct {
 	Status CoverageStatus `json:"status"`
 	Reason string         `json:"reason,omitempty"`
+
+	// Missing names the sources the service did not consult for this query
+	// (MissingOSVLive, MissingNoxCandidates). Unknown names are kept.
+	Missing []string `json:"missing,omitempty"`
+	// Source, with Status degraded, says where the advisories came from when it
+	// was not the usual path: "mirror" is the service's local corpus.
+	Source string `json:"source,omitempty"`
+	// MirrorSyncedAt is when that corpus last synced (RFC 3339).
+	MirrorSyncedAt string `json:"mirror_synced_at,omitempty"`
+}
+
+// MirrorOnlyNote is the phrase an intel_incomplete degradation's Detail carries
+// for a query answered from the service's mirror because live OSV was not
+// consulted. It is exported so a consumer can recognise that case by the
+// definition rather than by a copy of the sentence.
+const MirrorOnlyNote = "answered from the mirror only; live OSV was not consulted"
+
+// fromMirror reports whether the advisories came from the service's mirror
+// because live OSV was not consulted.
+func (c Coverage) fromMirror() bool {
+	return c.Source == "mirror" || c.missing(MissingOSVLive)
+}
+
+func (c Coverage) missing(name string) bool {
+	for _, m := range c.Missing {
+		if m == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Completeness is a reading of a BatchResult's coverage that keeps "the source
@@ -120,14 +162,34 @@ func (r BatchResult) Completeness() Completeness {
 	}
 }
 
-// partialReason renders why a Partial result is partial, for a degradation.
+// partialReason renders why a Partial result is partial, for a degradation. It
+// names what was not consulted, so "degraded" is never left to be guessed at.
 func (c Coverage) partialReason() string {
 	reason := string(c.Status)
 	if reason == "" {
 		reason = "unspecified"
 	}
+	var notes []string
 	if c.Reason != "" {
-		reason += ": " + c.Reason
+		notes = append(notes, c.Reason)
+	}
+	if c.fromMirror() {
+		note := MirrorOnlyNote
+		if c.MirrorSyncedAt != "" {
+			note += " (mirror synced " + c.MirrorSyncedAt + ")"
+		}
+		notes = append(notes, note)
+	}
+	if c.missing(MissingNoxCandidates) {
+		notes = append(notes, "NOX candidate store was not consulted")
+	}
+	for _, m := range c.Missing {
+		if m != MissingOSVLive && m != MissingNoxCandidates {
+			notes = append(notes, "not consulted: "+m)
+		}
+	}
+	if len(notes) > 0 {
+		reason += ": " + strings.Join(notes, "; ")
 	}
 	return reason
 }
@@ -139,6 +201,9 @@ type Source struct {
 	client  *http.Client
 	deg     *degrade.Degradations
 	cache   AdvisoryCache
+
+	// acceptDegraded sends X-Nox-Accept-Degraded: mirror on batch lookups.
+	acceptDegraded bool
 
 	// partial holds the query indices the most recent Lookup was told were
 	// answered incompletely. It is shared by copies made with WithCache.
@@ -173,6 +238,26 @@ func (s *Source) PartialQueries() map[int]struct{} {
 func (s *Source) WithCache(c AdvisoryCache) *Source {
 	out := *s
 	out.cache = c
+	return &out
+}
+
+// AcceptDegradedHeader is the request header by which a client tells NOX
+// Intelligence it reads nox_coverage and will take a mirror-backed answer,
+// marked degraded, when live OSV is down. Without it the service answers 503.
+const (
+	AcceptDegradedHeader = "X-Nox-Accept-Degraded"
+	AcceptDegradedMirror = "mirror"
+)
+
+// WithAcceptDegraded returns a copy that opts in to NOX Intelligence's
+// mirror-backed fallback. It is for the NOX Intelligence source only: OSV.dev
+// does not know the header, and a source that sent it without reading
+// nox_coverage would be taking a weaker answer for a complete one. This
+// source does read it — a degraded or unavailable query is recorded as an
+// intel_incomplete degradation, never as a clean result.
+func (s *Source) WithAcceptDegraded() *Source {
+	out := *s
+	out.acceptDegraded = true
 	return &out
 }
 
@@ -311,7 +396,7 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 				result[job.items[i].orig] = br.Vulns
 			}
 			if br.Completeness() == Partial {
-				partial = append(partial, partialQuery{idx: job.items[i].orig, q: job.items[i].q, why: br.Coverage.partialReason()})
+				partial = append(partial, partialQuery{idx: job.items[i].orig, q: job.items[i].q, why: br.Coverage.partialReason(), mirror: br.Coverage.fromMirror()})
 			}
 		}
 	}
@@ -335,6 +420,8 @@ type partialQuery struct {
 	idx int
 	q   vulnsource.Query
 	why string
+	// mirror is true when live OSV was not consulted for this query.
+	mirror bool
 }
 
 // maxPartialListed bounds how many packages a degradation names, so a service
@@ -365,9 +452,18 @@ func (s *Source) recordPartial(ctx context.Context, partial []partialQuery) {
 			fmt.Sprintf("and %d more", len(lines)-maxPartialListed))
 	}
 	slog.WarnContext(ctx, "vulnerability source answered incompletely", "source", s.name, "queries", len(partial))
+	impact := "an empty or short advisory list for these packages is not proof they are free of known vulnerabilities"
+	for _, p := range partial {
+		if p.mirror {
+			impact = fmt.Sprintf("answered from %s's mirror because live OSV was unavailable: "+
+				"advisories published or changed since the mirror last synced may be missing, "+
+				"and %s", s.name, impact)
+			break
+		}
+	}
 	s.deg.Add(degrade.IntelIncomplete,
 		fmt.Sprintf("%s answered %d package(s) incompletely: %s", s.name, len(partial), strings.Join(shown, "; ")),
-		"an empty or short advisory list for these packages is not proof they are free of known vulnerabilities")
+		impact)
 }
 
 // queryBatch sends one /v1/querybatch request. A transport error, a non-200
@@ -378,6 +474,9 @@ func (s *Source) queryBatch(ctx context.Context, url string, body []byte) ([]Bat
 		return nil, fmt.Errorf("creating OSV request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if s.acceptDegraded {
+		req.Header.Set(AcceptDegradedHeader, AcceptDegradedMirror)
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -423,6 +522,9 @@ func needed(cache AdvisoryCache, result map[int][]vulnsource.Record) (ids []stri
 			}
 			if cache != nil {
 				if rec, ok := cache.Get(id, vs[i].Modified); ok {
+					// The batch answer's annotations describe THIS answer;
+					// the cached copy's describe an earlier one.
+					rec.Provenance, rec.SameAs, rec.Disagreement = vs[i].Provenance, vs[i].SameAs, vs[i].Disagreement
 					vs[i] = rec
 					continue
 				}
@@ -531,6 +633,17 @@ func applyVulnDetails(vulns []vulnsource.Record, details map[string]vulnsource.R
 		// record in production while hand-built unit tests kept passing.
 		if detail.Intelligence != nil {
 			vulns[i].Intelligence = detail.Intelligence
+		}
+		// Annotations on the batch record describe this answer and win; the
+		// detail's are only a fallback for a batch that carried none.
+		if len(vulns[i].Provenance) == 0 {
+			vulns[i].Provenance = detail.Provenance
+		}
+		if len(vulns[i].SameAs) == 0 {
+			vulns[i].SameAs = detail.SameAs
+		}
+		if len(vulns[i].Disagreement) == 0 {
+			vulns[i].Disagreement = detail.Disagreement
 		}
 	}
 }

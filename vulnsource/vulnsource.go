@@ -86,6 +86,35 @@ type Record struct {
 	// It is namespaced under nox_intelligence so a record round-trips through
 	// the OSV wire format without colliding with anything OSV may add.
 	Intelligence *Intelligence `json:"nox_intelligence,omitempty"`
+
+	// Provenance says which upstream each retrieval of this record came from,
+	// how it was obtained (live, mirror, candidate) and when. Sent by NOX
+	// Intelligence as nox_provenance; absent from a plain OSV.dev response and
+	// then nil. It adds information and never changes what the record says.
+	Provenance []Provenance `json:"nox_provenance,omitempty"`
+
+	// SameAs lists other records in the same answer that name the same
+	// vulnerability under a different identifier (nox_same_as). The service
+	// merges nothing, so both records arrive; this is the hint that lets a
+	// consumer count them once.
+	SameAs []string `json:"nox_same_as,omitempty"`
+
+	// Disagreement lists how the live and mirrored copies of this record
+	// differ, when they do (nox_disagreement).
+	Disagreement []string `json:"nox_disagreement,omitempty"`
+}
+
+// Provenance is one retrieval of an advisory: the upstream database, the path
+// by which the source obtained it, and when.
+type Provenance struct {
+	// Source is the upstream database, e.g. "osv.dev".
+	Source string `json:"source"`
+	// Via is "live", "mirror" or "candidate". Unknown values are kept as sent.
+	Via string `json:"via"`
+	// RetrievedAt is when the retrieval happened (RFC 3339), if known.
+	RetrievedAt string `json:"retrieved_at,omitempty"`
+	// Modified is the upstream's own last-changed stamp on that version.
+	Modified string `json:"modified,omitempty"`
 }
 
 // Status returns the record's epistemic standing, resolving a record with no
