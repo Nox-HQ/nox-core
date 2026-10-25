@@ -102,6 +102,12 @@ type Record struct {
 	// Disagreement lists how the live and mirrored copies of this record
 	// differ, when they do (nox_disagreement).
 	Disagreement []string `json:"nox_disagreement,omitempty"`
+
+	// Symbols is affected-symbol intelligence (nox_symbols): the functions the
+	// advisory's publisher listed, or that its fix changed. Absent from a plain
+	// OSV.dev response. See AffectedSymbols for what it may and may not be used
+	// to conclude.
+	Symbols []AffectedSymbols `json:"nox_symbols,omitempty"`
 }
 
 // Provenance is one retrieval of an advisory: the upstream database, the path
@@ -165,6 +171,10 @@ type EcosystemSpecific struct {
 // Import is a single affected import path within a module.
 type Import struct {
 	Path string `json:"path"`
+	// Symbols are the functions within Path the publisher lists as affected
+	// (OSV ecosystem_specific.imports[].symbols). Empty means the advisory names
+	// the package and not the functions, which says nothing about which are safe.
+	Symbols []string `json:"symbols,omitempty"`
 }
 
 // Range is a version range with events marking introduction / fix.

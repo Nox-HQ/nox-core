@@ -129,6 +129,7 @@ func TestApplyVulnDetails_CopiesEveryField(t *testing.T) {
 		Provenance:   []vulnsource.Provenance{{Source: "osv.dev", Via: "live"}},
 		SameAs:       []string{"CVE-2024-0001"},
 		Disagreement: []string{"modified_mirror_older"},
+		Symbols:      []vulnsource.AffectedSymbols{{Package: "p", Method: vulnsource.SymbolMethodPatchDiff, Status: vulnsource.SymbolStatusOK}},
 	}
 
 	// Guard the guard: every field of vulnsource.Record must be set in the fixture, or

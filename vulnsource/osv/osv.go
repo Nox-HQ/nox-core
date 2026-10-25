@@ -645,6 +645,9 @@ func applyVulnDetails(vulns []vulnsource.Record, details map[string]vulnsource.R
 		if len(vulns[i].Disagreement) == 0 {
 			vulns[i].Disagreement = detail.Disagreement
 		}
+		if len(vulns[i].Symbols) == 0 {
+			vulns[i].Symbols = detail.Symbols
+		}
 	}
 }
 
