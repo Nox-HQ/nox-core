@@ -126,6 +126,9 @@ func TestApplyVulnDetails_CopiesEveryField(t *testing.T) {
 			Corroboration: 3,
 			SourceName:    "nox-intel",
 		},
+		Provenance:   []vulnsource.Provenance{{Source: "osv.dev", Via: "live"}},
+		SameAs:       []string{"CVE-2024-0001"},
+		Disagreement: []string{"modified_mirror_older"},
 	}
 
 	// Guard the guard: every field of vulnsource.Record must be set in the fixture, or
