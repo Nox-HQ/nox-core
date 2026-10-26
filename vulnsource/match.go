@@ -63,15 +63,24 @@ func ComparableVersion(v string) bool {
 	return true
 }
 
-// CompareVersions orders two semver-shaped versions, returning -1, 0, or 1.
-// A release sorts above its own prereleases.
+// CompareVersions orders two dotted-numeric versions, returning -1, 0, or 1.
+// Every numeric segment takes part ("6.6.0.7" > "6.6.0.3"; NuGet and PyPI use
+// four and more), missing trailing segments count as zero ("1.2" == "1.2.0"),
+// and a release sorts above its own prereleases.
 func CompareVersions(a, b string) int {
 	an, apre := splitVersion(a)
 	bn, bpre := splitVersion(b)
 
-	for i := range 3 {
-		if an[i] != bn[i] {
-			if an[i] < bn[i] {
+	for i := range max(len(an), len(bn)) {
+		var x, y int
+		if i < len(an) {
+			x = an[i]
+		}
+		if i < len(bn) {
+			y = bn[i]
+		}
+		if x != y {
+			if x < y {
 				return -1
 			}
 			return 1
@@ -92,17 +101,15 @@ func CompareVersions(a, b string) int {
 	}
 }
 
-// splitVersion breaks "v1.2.3-rc1" into its numeric triple and prerelease.
-func splitVersion(v string) (nums [3]int, prerelease string) {
+// splitVersion breaks "v1.2.3.4-rc1" into its numeric segments and prerelease.
+// A segment with a non-digit in it counts as zero, as it always has.
+func splitVersion(v string) (nums []int, prerelease string) {
 	v = strings.TrimPrefix(v, "v")
 	if i := strings.Index(v, "+"); i >= 0 { // build metadata is not ordered
 		v = v[:i]
 	}
 	core, pre, _ := strings.Cut(v, "-")
-	for i, part := range strings.SplitN(core, ".", 3) {
-		if i > 2 {
-			break
-		}
+	for _, part := range strings.Split(core, ".") {
 		n := 0
 		for _, r := range part {
 			if r < '0' || r > '9' {
@@ -111,7 +118,7 @@ func splitVersion(v string) (nums [3]int, prerelease string) {
 			}
 			n = n*10 + int(r-'0')
 		}
-		nums[i] = n
+		nums = append(nums, n)
 	}
 	return nums, pre
 }
@@ -226,4 +233,143 @@ func (r *Record) FixedVersion(pkgName, wireEcosystem, installed string) string {
 		}
 	}
 	return best
+}
+
+// Verdict is a three-valued answer to "does this advisory affect that version".
+// The third value exists because two-valued matching turns "the data cannot
+// say" into "not affected", which is a false all-clear.
+type Verdict int
+
+const (
+	// VerdictNotAffected: every entry naming the package is decidable and none covers
+	// the version.
+	VerdictNotAffected Verdict = iota
+	// VerdictAffected: the explicit versions list names the version, or an ordered
+	// range covers it.
+	VerdictAffected
+	// VerdictUndecidable: an entry naming the package carries nothing a package-level
+	// match can be made from (no versions list and only GIT or unknown range
+	// types, or no ranges at all), and nothing else decided it Affected.
+	VerdictUndecidable
+)
+
+func (v Verdict) String() string {
+	switch v {
+	case VerdictAffected:
+		return "affected"
+	case VerdictUndecidable:
+		return "undecidable"
+	}
+	return "not-affected"
+}
+
+// Decide decides whether the advisory affects pkgName at version, following
+// OSV's own rule for package queries:
+//
+//   - the version appearing in an entry's explicit versions list is affected;
+//   - SEMVER and ECOSYSTEM ranges are ordered with the version comparator;
+//   - GIT ranges hold commit hashes, not versions, and are never compared. They
+//     only answer commit queries.
+//
+// An entry that lists versions explicitly is fully decided by that list plus its
+// ordered ranges, so a version absent from both is VerdictNotAffected. An entry with no
+// versions list whose ranges are GIT-only, of an unknown type, or absent cannot
+// be decided, and yields VerdictUndecidable rather than VerdictNotAffected unless another
+// entry or an ordered range already says Affected. A withdrawn advisory affects
+// nothing.
+func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
+	if r.Retracted() {
+		return VerdictNotAffected
+	}
+	undecidable := false
+	for _, aff := range r.Affected {
+		if !strings.EqualFold(aff.Package.Name, pkgName) {
+			continue
+		}
+		if aff.Package.Ecosystem != "" && wireEcosystem != "" &&
+			!strings.EqualFold(aff.Package.Ecosystem, wireEcosystem) {
+			continue
+		}
+		if listsVersion(aff.Versions, version) {
+			return VerdictAffected
+		}
+		ordered := Record{Affected: []Affected{{Package: aff.Package}}}
+		sawOrdered := false
+		for _, rg := range aff.Ranges {
+			if rg.Type == "SEMVER" || rg.Type == "ECOSYSTEM" {
+				ordered.Affected[0].Ranges = append(ordered.Affected[0].Ranges, rg)
+				sawOrdered = true
+			}
+		}
+		if sawOrdered && ordered.Affects(pkgName, wireEcosystem, version) {
+			return VerdictAffected
+		}
+		if len(aff.Versions) == 0 && !sawOrdered {
+			undecidable = true
+		} else if len(aff.Versions) == 0 && len(aff.Ranges) > len(ordered.Affected[0].Ranges) {
+			// Ordered ranges did not cover it, but a range of another type
+			// might: OSV reads those too for some ecosystems.
+			undecidable = true
+		}
+	}
+	if undecidable {
+		return VerdictUndecidable
+	}
+	return VerdictNotAffected
+}
+
+// listsVersion reports whether the explicit list names version. Matching is
+// exact, tolerating only a leading "v", which Go-style tags carry and some
+// sources drop.
+func listsVersion(list []string, version string) bool {
+	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	for _, s := range list {
+		if s == version || strings.TrimPrefix(s, "v") == v {
+			return true
+		}
+	}
+	return false
+}
+
+// OrderedIntervals is AffectedIntervals restricted to the range types whose
+// events are versions: SEMVER and ECOSYSTEM. A GIT range's events are commit
+// hashes; AffectedIntervals folds them in beside real versions, which is right
+// for a caller that wants everything the advisory says and wrong for one that
+// reports a "fixed in" version or compares an installed version to the bounds.
+func (r *Record) OrderedIntervals(pkgName, wireEcosystem string) []Interval {
+	ordered := Record{ID: r.ID, Withdrawn: r.Withdrawn}
+	for _, aff := range r.Affected {
+		keep := aff
+		keep.Ranges = nil
+		for _, rg := range aff.Ranges {
+			if rg.Type == "SEMVER" || rg.Type == "ECOSYSTEM" {
+				keep.Ranges = append(keep.Ranges, rg)
+			}
+		}
+		ordered.Affected = append(ordered.Affected, keep)
+	}
+	return ordered.AffectedIntervals(pkgName, wireEcosystem)
+}
+
+// ListedVersions returns the explicit affected-versions lists of the entries
+// naming pkgName, de-duplicated, in first-seen order.
+func (r *Record) ListedVersions(pkgName, wireEcosystem string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, aff := range r.Affected {
+		if !strings.EqualFold(aff.Package.Name, pkgName) {
+			continue
+		}
+		if aff.Package.Ecosystem != "" && wireEcosystem != "" &&
+			!strings.EqualFold(aff.Package.Ecosystem, wireEcosystem) {
+			continue
+		}
+		for _, v := range aff.Versions {
+			if _, dup := seen[v]; !dup {
+				seen[v] = struct{}{}
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }

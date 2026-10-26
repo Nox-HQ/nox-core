@@ -154,8 +154,13 @@ type Package struct {
 
 // Affected describes packages and version ranges affected by a vulnerability.
 type Affected struct {
-	Package           Package           `json:"package"`
-	Ranges            []Range           `json:"ranges"`
+	Package Package `json:"package"`
+	Ranges  []Range `json:"ranges"`
+	// Versions is OSV's explicit list of affected versions. OSV decides a
+	// package query from this list together with the SEMVER and ECOSYSTEM
+	// ranges; many advisories (Hex, malware reports, GIT-ranged entries) carry
+	// only this list. See Record.Decide.
+	Versions          []string          `json:"versions,omitempty"`
 	EcosystemSpecific EcosystemSpecific `json:"ecosystem_specific"`
 }
 
