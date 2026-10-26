@@ -10,7 +10,7 @@ func validReport() RunReport {
 	return RunReport{
 		SchemaVersion: RunReportSchema, Fingerprint: strings.Repeat("a", 64),
 		Exploitability: Confirmed, Kind: KindDynamicExploit,
-		Deterministic: true, Reproduced: true, Samples: 3, Hits: 3,
+		Deterministic: true, Reproduced: true, ControlSound: true, Samples: 3, Hits: 3,
 		Profile: "sandbox", TraceDigest: strings.Repeat("b", 64),
 		Tool: "nox", Version: "1.50.0", ObservedAt: "2026-10-26T10:00:00Z",
 	}
@@ -45,6 +45,7 @@ func TestRunReport_Refusals(t *testing.T) {
 			r.Deterministic = false
 		},
 		"confirmed unreproduced": func(r *RunReport) { r.Reproduced = false },
+		"confirmed no control":   func(r *RunReport) { r.ControlSound = false },
 		"confirmed by static":    func(r *RunReport) { r.Kind = KindStatic },
 	}
 	for name, mut := range cases {

@@ -46,6 +46,10 @@ type RunReport struct {
 	Deterministic bool `json:"deterministic"`
 	// Reproduced is true when the violation recurred under the determinism gate.
 	Reproduced bool `json:"reproduced"`
+	// ControlSound is true when the run's benign control stayed clean, i.e. the
+	// environment could tell obedience from noise. CONFIRMED is meaningless
+	// without it, so Validate demands it, as the service's own derivation does.
+	ControlSound bool `json:"control_sound"`
 	// Samples and Hits are the determinism gate's denominator and numerator.
 	Samples int `json:"samples"`
 	Hits    int `json:"hits"`
@@ -84,6 +88,7 @@ const (
 	AttrReportedExploitability = "reported_exploitability"
 	AttrReportedDeterministic  = "reported_deterministic"
 	AttrReportedReproduced     = "reported_reproduced"
+	AttrReportedControlSound   = "reported_control_sound"
 	AttrTraceDigest            = "trace_digest"
 	AttrReportedProfile        = "profile"
 	// AttrScope marks the claim as reporter-scoped.
@@ -157,6 +162,8 @@ func (r RunReport) Validate() error {
 		switch {
 		case !r.Kind.Deterministic():
 			return bad("CONFIRMED needs deterministic evidence; kind %q is not", r.Kind)
+		case !r.ControlSound:
+			return bad("CONFIRMED needs a sound benign control; without one the environment cannot tell obedience from noise")
 		case !r.Deterministic || !r.Reproduced:
 			return bad("CONFIRMED needs a deterministic oracle and a reproduction")
 		case r.Kind.Strength() < reproductionStrength:
@@ -210,6 +217,7 @@ func (r RunReport) Claim(source, sourceID string) Claim {
 			AttrReportedExploitability: string(r.Exploitability),
 			AttrReportedDeterministic:  strconv.FormatBool(r.Deterministic),
 			AttrReportedReproduced:     strconv.FormatBool(r.Reproduced),
+			AttrReportedControlSound:   strconv.FormatBool(r.ControlSound),
 			AttrTraceDigest:            r.TraceDigest,
 			AttrReportedProfile:        r.Profile,
 		},
