@@ -30,15 +30,15 @@ func TestDecide(t *testing.T) {
 	}{
 		{"listed version", affected([]string{"2.9.0"}, gitRange), "2.9.0", VerdictAffected},
 		{"listed with v prefix", affected([]string{"v2.9.0"}), "2.9.0", VerdictAffected},
-		{"git range with list, version absent: the list is complete", affected([]string{"2.9.0"}, gitRange), "1.0.0", NotAffected},
-		{"git only, no list", affected(nil, gitRange), "2.9.0", Undecidable},
-		{"no ranges, no list", affected(nil), "2.9.0", Undecidable},
+		{"git range with list, version absent: the list is complete", affected([]string{"2.9.0"}, gitRange), "1.0.0", VerdictNotAffected},
+		{"git only, no list", affected(nil, gitRange), "2.9.0", VerdictUndecidable},
+		{"no ranges, no list", affected(nil), "2.9.0", VerdictUndecidable},
 		{"semver covers", affected(nil, semverRange), "2.9.0", VerdictAffected},
-		{"semver fixed", affected(nil, semverRange), "3.0.0", NotAffected},
+		{"semver fixed", affected(nil, semverRange), "3.0.0", VerdictNotAffected},
 		{"semver covers beside git", affected(nil, gitRange, semverRange), "2.9.0", VerdictAffected},
-		{"semver misses beside git", affected(nil, gitRange, semverRange), "3.1.0", Undecidable},
-		{"unknown range type", affected(nil, rng("WEIRD", Event{Introduced: "0"})), "1.0.0", Undecidable},
-		{"list plus semver miss", affected([]string{"9.9.9"}, semverRange), "5.0.0", NotAffected},
+		{"semver misses beside git", affected(nil, gitRange, semverRange), "3.1.0", VerdictUndecidable},
+		{"unknown range type", affected(nil, rng("WEIRD", Event{Introduced: "0"})), "1.0.0", VerdictUndecidable},
+		{"list plus semver miss", affected([]string{"9.9.9"}, semverRange), "5.0.0", VerdictNotAffected},
 	}
 	for _, c := range cases {
 		if got := c.rec.Decide("pkg", "Hex", c.ver); got != c.want {
@@ -50,14 +50,14 @@ func TestDecide(t *testing.T) {
 func TestDecideWithdrawnAndOtherPackages(t *testing.T) {
 	r := affected([]string{"1.0.0"})
 	r.Withdrawn = "2024-01-01T00:00:00Z"
-	if r.Decide("pkg", "Hex", "1.0.0") != NotAffected {
+	if r.Decide("pkg", "Hex", "1.0.0") != VerdictNotAffected {
 		t.Error("withdrawn advisory must affect nothing")
 	}
 	other := affected(nil, gitRange)
-	if other.Decide("elsewhere", "Hex", "1.0.0") != NotAffected {
+	if other.Decide("elsewhere", "Hex", "1.0.0") != VerdictNotAffected {
 		t.Error("an entry for another package says nothing about this one")
 	}
-	if other.Decide("pkg", "npm", "1.0.0") != NotAffected {
+	if other.Decide("pkg", "npm", "1.0.0") != VerdictNotAffected {
 		t.Error("an entry for another ecosystem says nothing about this one")
 	}
 }

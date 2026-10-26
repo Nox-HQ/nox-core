@@ -234,23 +234,23 @@ func (r *Record) FixedVersion(pkgName, wireEcosystem, installed string) string {
 type Verdict int
 
 const (
-	// NotAffected: every entry naming the package is decidable and none covers
+	// VerdictNotAffected: every entry naming the package is decidable and none covers
 	// the version.
-	NotAffected Verdict = iota
-	// Affected: the explicit versions list names the version, or an ordered
+	VerdictNotAffected Verdict = iota
+	// VerdictAffected: the explicit versions list names the version, or an ordered
 	// range covers it.
 	VerdictAffected
-	// Undecidable: an entry naming the package carries nothing a package-level
+	// VerdictUndecidable: an entry naming the package carries nothing a package-level
 	// match can be made from (no versions list and only GIT or unknown range
 	// types, or no ranges at all), and nothing else decided it Affected.
-	Undecidable
+	VerdictUndecidable
 )
 
 func (v Verdict) String() string {
 	switch v {
 	case VerdictAffected:
 		return "affected"
-	case Undecidable:
+	case VerdictUndecidable:
 		return "undecidable"
 	}
 	return "not-affected"
@@ -265,14 +265,14 @@ func (v Verdict) String() string {
 //     only answer commit queries.
 //
 // An entry that lists versions explicitly is fully decided by that list plus its
-// ordered ranges, so a version absent from both is NotAffected. An entry with no
+// ordered ranges, so a version absent from both is VerdictNotAffected. An entry with no
 // versions list whose ranges are GIT-only, of an unknown type, or absent cannot
-// be decided, and yields Undecidable rather than NotAffected unless another
+// be decided, and yields VerdictUndecidable rather than VerdictNotAffected unless another
 // entry or an ordered range already says Affected. A withdrawn advisory affects
 // nothing.
 func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 	if r.Retracted() {
-		return NotAffected
+		return VerdictNotAffected
 	}
 	undecidable := false
 	for _, aff := range r.Affected {
@@ -306,9 +306,9 @@ func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 		}
 	}
 	if undecidable {
-		return Undecidable
+		return VerdictUndecidable
 	}
-	return NotAffected
+	return VerdictNotAffected
 }
 
 // listsVersion reports whether the explicit list names version. Matching is
