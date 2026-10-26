@@ -227,3 +227,99 @@ func (r *Record) FixedVersion(pkgName, wireEcosystem, installed string) string {
 	}
 	return best
 }
+
+// Verdict is a three-valued answer to "does this advisory affect that version".
+// The third value exists because two-valued matching turns "the data cannot
+// say" into "not affected", which is a false all-clear.
+type Verdict int
+
+const (
+	// NotAffected: every entry naming the package is decidable and none covers
+	// the version.
+	NotAffected Verdict = iota
+	// Affected: the explicit versions list names the version, or an ordered
+	// range covers it.
+	VerdictAffected
+	// Undecidable: an entry naming the package carries nothing a package-level
+	// match can be made from (no versions list and only GIT or unknown range
+	// types, or no ranges at all), and nothing else decided it Affected.
+	Undecidable
+)
+
+func (v Verdict) String() string {
+	switch v {
+	case VerdictAffected:
+		return "affected"
+	case Undecidable:
+		return "undecidable"
+	}
+	return "not-affected"
+}
+
+// Decide decides whether the advisory affects pkgName at version, following
+// OSV's own rule for package queries:
+//
+//   - the version appearing in an entry's explicit versions list is affected;
+//   - SEMVER and ECOSYSTEM ranges are ordered with the version comparator;
+//   - GIT ranges hold commit hashes, not versions, and are never compared. They
+//     only answer commit queries.
+//
+// An entry that lists versions explicitly is fully decided by that list plus its
+// ordered ranges, so a version absent from both is NotAffected. An entry with no
+// versions list whose ranges are GIT-only, of an unknown type, or absent cannot
+// be decided, and yields Undecidable rather than NotAffected unless another
+// entry or an ordered range already says Affected. A withdrawn advisory affects
+// nothing.
+func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
+	if r.Retracted() {
+		return NotAffected
+	}
+	undecidable := false
+	for _, aff := range r.Affected {
+		if !strings.EqualFold(aff.Package.Name, pkgName) {
+			continue
+		}
+		if aff.Package.Ecosystem != "" && wireEcosystem != "" &&
+			!strings.EqualFold(aff.Package.Ecosystem, wireEcosystem) {
+			continue
+		}
+		if listsVersion(aff.Versions, version) {
+			return VerdictAffected
+		}
+		ordered := Record{Affected: []Affected{{Package: aff.Package}}}
+		sawOrdered := false
+		for _, rg := range aff.Ranges {
+			if rg.Type == "SEMVER" || rg.Type == "ECOSYSTEM" {
+				ordered.Affected[0].Ranges = append(ordered.Affected[0].Ranges, rg)
+				sawOrdered = true
+			}
+		}
+		if sawOrdered && ordered.Affects(pkgName, wireEcosystem, version) {
+			return VerdictAffected
+		}
+		if len(aff.Versions) == 0 && !sawOrdered {
+			undecidable = true
+		} else if len(aff.Versions) == 0 && len(aff.Ranges) > len(ordered.Affected[0].Ranges) {
+			// Ordered ranges did not cover it, but a range of another type
+			// might: OSV reads those too for some ecosystems.
+			undecidable = true
+		}
+	}
+	if undecidable {
+		return Undecidable
+	}
+	return NotAffected
+}
+
+// listsVersion reports whether the explicit list names version. Matching is
+// exact, tolerating only a leading "v", which Go-style tags carry and some
+// sources drop.
+func listsVersion(list []string, version string) bool {
+	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	for _, s := range list {
+		if s == version || strings.TrimPrefix(s, "v") == v {
+			return true
+		}
+	}
+	return false
+}
