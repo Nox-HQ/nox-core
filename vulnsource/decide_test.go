@@ -83,3 +83,20 @@ func TestAffectedVersionsRoundTrip(t *testing.T) {
 		t.Errorf("empty versions must be omitted: %s", b)
 	}
 }
+
+func TestOrderedIntervalsSkipsGitHashes(t *testing.T) {
+	r := affected([]string{"1.0.0", "1.0.0", "2.0.0"}, gitRange, semverRange)
+	if got := r.AffectedIntervals("pkg", "Hex"); len(got) != 2 {
+		t.Fatalf("AffectedIntervals folds every range type: %v", got)
+	}
+	got := r.OrderedIntervals("pkg", "Hex")
+	if len(got) != 1 || got[0].Fixed != "3.0.0" {
+		t.Errorf("OrderedIntervals = %v, want only the SEMVER interval", got)
+	}
+	if v := r.ListedVersions("pkg", "Hex"); len(v) != 2 || v[0] != "1.0.0" || v[1] != "2.0.0" {
+		t.Errorf("ListedVersions = %v", v)
+	}
+	if v := r.ListedVersions("other", "Hex"); len(v) != 0 {
+		t.Errorf("ListedVersions for another package = %v", v)
+	}
+}

@@ -323,3 +323,46 @@ func listsVersion(list []string, version string) bool {
 	}
 	return false
 }
+
+// OrderedIntervals is AffectedIntervals restricted to the range types whose
+// events are versions: SEMVER and ECOSYSTEM. A GIT range's events are commit
+// hashes; AffectedIntervals folds them in beside real versions, which is right
+// for a caller that wants everything the advisory says and wrong for one that
+// reports a "fixed in" version or compares an installed version to the bounds.
+func (r *Record) OrderedIntervals(pkgName, wireEcosystem string) []Interval {
+	ordered := Record{ID: r.ID, Withdrawn: r.Withdrawn}
+	for _, aff := range r.Affected {
+		keep := aff
+		keep.Ranges = nil
+		for _, rg := range aff.Ranges {
+			if rg.Type == "SEMVER" || rg.Type == "ECOSYSTEM" {
+				keep.Ranges = append(keep.Ranges, rg)
+			}
+		}
+		ordered.Affected = append(ordered.Affected, keep)
+	}
+	return ordered.AffectedIntervals(pkgName, wireEcosystem)
+}
+
+// ListedVersions returns the explicit affected-versions lists of the entries
+// naming pkgName, de-duplicated, in first-seen order.
+func (r *Record) ListedVersions(pkgName, wireEcosystem string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, aff := range r.Affected {
+		if !strings.EqualFold(aff.Package.Name, pkgName) {
+			continue
+		}
+		if aff.Package.Ecosystem != "" && wireEcosystem != "" &&
+			!strings.EqualFold(aff.Package.Ecosystem, wireEcosystem) {
+			continue
+		}
+		for _, v := range aff.Versions {
+			if _, dup := seen[v]; !dup {
+				seen[v] = struct{}{}
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
