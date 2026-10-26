@@ -2,6 +2,7 @@ package vulnsource
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -30,7 +31,8 @@ func TestDecide(t *testing.T) {
 	}{
 		{"listed version", affected([]string{"2.9.0"}, gitRange), "2.9.0", VerdictAffected},
 		{"listed with v prefix", affected([]string{"v2.9.0"}), "2.9.0", VerdictAffected},
-		{"git range with list, version absent: the list is complete", affected([]string{"2.9.0"}, gitRange), "1.0.0", VerdictNotAffected},
+		{"git range with list, version absent: the range may know more", affected([]string{"2.9.0"}, gitRange), "1.0.0", VerdictUndecidable},
+		{"git range with list, version listed", affected([]string{"2.9.0"}, gitRange), "2.9.0", VerdictAffected},
 		{"git only, no list", affected(nil, gitRange), "2.9.0", VerdictUndecidable},
 		{"no ranges, no list", affected(nil), "2.9.0", VerdictUndecidable},
 		{"semver covers", affected(nil, semverRange), "2.9.0", VerdictAffected},
@@ -98,5 +100,30 @@ func TestOrderedIntervalsSkipsGitHashes(t *testing.T) {
 	}
 	if v := r.ListedVersions("other", "Hex"); len(v) != 0 {
 		t.Errorf("ListedVersions for another package = %v", v)
+	}
+}
+
+// The two hackney advisories as api.osv.dev serves them (EEF-CVE-2026-112880 and
+// -113440): a package entry with a SEMVER range and a version list, and a
+// separate package-less entry holding the GIT range. 2.0.0 and 3.0.0 are
+// affected; the decision must not depend on the GIT entry.
+func TestDecideRealHackneyRecords(t *testing.T) {
+	for _, id := range []string{"EEF-CVE-2026-112880", "EEF-CVE-2026-113440"} {
+		b, err := os.ReadFile("testdata/" + id + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r Record
+		if err := json.Unmarshal(b, &r); err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range []string{"2.0.0", "3.0.0", "4.8.7"} {
+			if got := r.Decide("hackney", "Hex", v); got != VerdictAffected {
+				t.Errorf("%s hackney %s = %v, want affected", id, v, got)
+			}
+		}
+		if got := r.Decide("hackney", "Hex", "4.9.0"); got != VerdictNotAffected {
+			t.Errorf("%s hackney 4.9.0 (the fixed version) = %v", id, got)
+		}
 	}
 }

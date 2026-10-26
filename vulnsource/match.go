@@ -271,10 +271,11 @@ func (v Verdict) String() string {
 //   - GIT ranges hold commit hashes, not versions, and are never compared. They
 //     only answer commit queries.
 //
-// An entry that lists versions explicitly is fully decided by that list plus its
-// ordered ranges, so a version absent from both is VerdictNotAffected. An entry with no
-// versions list whose ranges are GIT-only, of an unknown type, or absent cannot
-// be decided, and yields VerdictUndecidable rather than VerdictNotAffected unless another
+// An entry that lists versions explicitly, and has no range of another type, is
+// fully decided by that list plus its ordered ranges, so a version absent from
+// both is VerdictNotAffected. An entry that also carries a GIT (or unknown-type)
+// range, or has no versions list with only such ranges, or has no ranges at all,
+// cannot be decided, and yields VerdictUndecidable rather than VerdictNotAffected unless another
 // entry or an ordered range already says Affected. A withdrawn advisory affects
 // nothing.
 func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
@@ -304,11 +305,17 @@ func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 		if sawOrdered && ordered.Affects(pkgName, wireEcosystem, version) {
 			return VerdictAffected
 		}
-		if len(aff.Versions) == 0 && !sawOrdered {
+		hasOther := len(aff.Ranges) > len(ordered.Affected[0].Ranges)
+		switch {
+		case len(aff.Versions) == 0 && !sawOrdered:
 			undecidable = true
-		} else if len(aff.Versions) == 0 && len(aff.Ranges) > len(ordered.Affected[0].Ranges) {
-			// Ordered ranges did not cover it, but a range of another type
-			// might: OSV reads those too for some ecosystems.
+		case hasOther:
+			// Neither the list nor an ordered range names the version, but a
+			// range of another type (GIT: resolved through the repository's
+			// tags, which this record does not carry) might. OSV's own
+			// package-query rule ignores GIT ranges and every probe agrees,
+			// but the cost of not trusting that is a handful of entries and
+			// the cost of trusting it wrongly is a false all-clear.
 			undecidable = true
 		}
 	}
