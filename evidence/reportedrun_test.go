@@ -33,6 +33,7 @@ func TestRunReport_Refusals(t *testing.T) {
 		"state":             func(r *RunReport) { r.Exploitability = "PWNED" },
 		"unknown kind":      func(r *RunReport) { r.Kind = "vibes" },
 		"claim kind":        func(r *RunReport) { r.Kind = ReportedRunKind },
+		"maintainer kind":   func(r *RunReport) { r.Kind = KindMaintainerConfirmed },
 		"safe profile":      func(r *RunReport) { r.Profile = "safe" },
 		"digest":            func(r *RunReport) { r.TraceDigest = "http://target/trace" },
 		"hits>samples":      func(r *RunReport) { r.Hits = 4 },
@@ -105,5 +106,31 @@ func TestRunReportClaim_CarriesProvenance(t *testing.T) {
 	if c.Provenance.Reference != strings.Repeat("b", 64) || c.Provenance.SourceID != "att_1" ||
 		c.Attributes[AttrScope] != ScopeReporter || c.Attributes[AttrReportedStrength] != "95" {
 		t.Fatalf("%+v", c)
+	}
+}
+
+func TestConfirmedByIsTheOneRule(t *testing.T) {
+	type c struct {
+		k            Kind
+		det, rep, ok bool
+		want         bool
+	}
+	for i, tc := range []c{
+		{KindDynamicExploit, true, true, true, true},
+		{KindControlledReproduction, true, true, true, true},
+		{KindDynamicExploit, true, true, false, false}, // control tripped
+		{KindDynamicExploit, true, false, true, false}, // did not reproduce
+		{KindDynamicExploit, false, true, true, false}, // not deterministic
+		{KindSourceConfirmed, true, true, true, false}, // below reproduction strength
+		{KindSemantic, true, true, true, false},        // judgment
+		{KindStatic, true, true, true, false},
+		{KindMaintainerConfirmed, true, true, true, true}, // strong and deterministic kind
+	} {
+		if got := ConfirmedBy(tc.k, tc.det, tc.rep, tc.ok); got != tc.want {
+			t.Errorf("case %d %+v: got %v", i, tc, got)
+		}
+	}
+	if QualifiesAsReproduction(KindHeuristic, true) {
+		t.Error("a heuristic qualified as a reproduction")
 	}
 }

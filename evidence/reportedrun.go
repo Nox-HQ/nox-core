@@ -135,6 +135,9 @@ func (r RunReport) Validate() error {
 	if !r.Kind.Valid() {
 		return bad("kind %q is not a defined evidence kind", r.Kind)
 	}
+	if !ReporterMayAssert(r.Kind) {
+		return bad("kind %q is another party's to give (a maintainer, an advisory, a source read)", r.Kind)
+	}
 	if r.Kind == ReportedRunKind {
 		return bad("kind must be the kind of the run's own evidence, not %q", ReportedRunKind)
 	}
@@ -157,19 +160,11 @@ func (r RunReport) Validate() error {
 		return bad("observed_at must be RFC3339")
 	}
 	// The consistency the evidence model itself demands: CONFIRMED is never a
-	// matter of what a reporter calls it.
-	if r.Exploitability == Confirmed {
-		switch {
-		case !r.Kind.Deterministic():
-			return bad("CONFIRMED needs deterministic evidence; kind %q is not", r.Kind)
-		case !r.ControlSound:
-			return bad("CONFIRMED needs a sound benign control; without one the environment cannot tell obedience from noise")
-		case !r.Deterministic || !r.Reproduced:
-			return bad("CONFIRMED needs a deterministic oracle and a reproduction")
-		case r.Kind.Strength() < reproductionStrength:
-			return bad("CONFIRMED needs evidence at reproduction strength or above; %q is %d",
-				r.Kind, r.Kind.Strength())
-		}
+	// matter of what a reporter calls it. One rule, ConfirmedBy, shared with every
+	// consumer that derives a verdict from a claimed run.
+	if r.Exploitability == Confirmed && !ConfirmedBy(r.Kind, r.Deterministic, r.Reproduced, r.ControlSound) {
+		return bad("CONFIRMED needs a deterministic evidence kind at reproduction strength or above "+
+			"(got %q, strength %d), a deterministic oracle, a reproduction and a sound benign control", r.Kind, r.Kind.Strength())
 	}
 	for _, s := range []string{r.Tool, r.Version} {
 		if strings.Contains(s, "://") || strings.ContainsAny(s, "/\\") {
@@ -179,8 +174,26 @@ func (r RunReport) Validate() error {
 	return nil
 }
 
-// reproductionStrength is the weakest strength that counts as a reproduction.
-var reproductionStrength = KindControlledReproduction.Strength()
+// ReproductionStrength is the weakest evidence strength that counts as a
+// reproduction.
+var ReproductionStrength = KindControlledReproduction.Strength()
+
+// QualifiesAsReproduction reports whether a claimed run's evidence is of a kind
+// that can back CONFIRMED: a deterministic kind at reproduction strength or
+// above, with a deterministic oracle behind it. A bare "deterministic: true" on
+// a heuristic or semantic kind is a claim of determinism, not evidence of it.
+func QualifiesAsReproduction(kind Kind, deterministic bool) bool {
+	return deterministic && kind.Deterministic() && kind.Strength() >= ReproductionStrength
+}
+
+// ConfirmedBy is the single definition of when a CLAIMED run may be read as
+// CONFIRMED: qualifying evidence (QualifiesAsReproduction), a violation that
+// reproduced, and a sound benign control. Producers validate with it and the
+// service's derivation builds on QualifiesAsReproduction, so the rule is stated
+// once.
+func ConfirmedBy(kind Kind, deterministic, reproduced, controlSound bool) bool {
+	return QualifiesAsReproduction(kind, deterministic) && reproduced && controlSound
+}
 
 // Strength is the 0-100 weight the run's own evidence kind carries at the
 // reporter. It is derived, and it applies to the reporter's view only: see
@@ -222,4 +235,16 @@ func (r RunReport) Claim(source, sourceID string) Claim {
 			AttrReportedProfile:        r.Profile,
 		},
 	}
+}
+
+// ReporterMayAssert reports whether a reporter may claim evidence of this kind
+// about its own run. A run it reproduced may be a controlled reproduction or a
+// dynamic exploit; a maintainer's word, a published advisory or a source read
+// are other parties' to give.
+func ReporterMayAssert(k Kind) bool {
+	switch k {
+	case KindHeuristic, KindSemantic, KindStatic, KindControlledReproduction, KindDynamicExploit:
+		return true
+	}
+	return false
 }
