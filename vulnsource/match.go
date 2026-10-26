@@ -63,15 +63,24 @@ func ComparableVersion(v string) bool {
 	return true
 }
 
-// CompareVersions orders two semver-shaped versions, returning -1, 0, or 1.
-// A release sorts above its own prereleases.
+// CompareVersions orders two dotted-numeric versions, returning -1, 0, or 1.
+// Every numeric segment takes part ("6.6.0.7" > "6.6.0.3"; NuGet and PyPI use
+// four and more), missing trailing segments count as zero ("1.2" == "1.2.0"),
+// and a release sorts above its own prereleases.
 func CompareVersions(a, b string) int {
 	an, apre := splitVersion(a)
 	bn, bpre := splitVersion(b)
 
-	for i := range 3 {
-		if an[i] != bn[i] {
-			if an[i] < bn[i] {
+	for i := range max(len(an), len(bn)) {
+		var x, y int
+		if i < len(an) {
+			x = an[i]
+		}
+		if i < len(bn) {
+			y = bn[i]
+		}
+		if x != y {
+			if x < y {
 				return -1
 			}
 			return 1
@@ -92,17 +101,15 @@ func CompareVersions(a, b string) int {
 	}
 }
 
-// splitVersion breaks "v1.2.3-rc1" into its numeric triple and prerelease.
-func splitVersion(v string) (nums [3]int, prerelease string) {
+// splitVersion breaks "v1.2.3.4-rc1" into its numeric segments and prerelease.
+// A segment with a non-digit in it counts as zero, as it always has.
+func splitVersion(v string) (nums []int, prerelease string) {
 	v = strings.TrimPrefix(v, "v")
 	if i := strings.Index(v, "+"); i >= 0 { // build metadata is not ordered
 		v = v[:i]
 	}
 	core, pre, _ := strings.Cut(v, "-")
-	for i, part := range strings.SplitN(core, ".", 3) {
-		if i > 2 {
-			break
-		}
+	for _, part := range strings.Split(core, ".") {
 		n := 0
 		for _, r := range part {
 			if r < '0' || r > '9' {
@@ -111,7 +118,7 @@ func splitVersion(v string) (nums [3]int, prerelease string) {
 			}
 			n = n*10 + int(r-'0')
 		}
-		nums[i] = n
+		nums = append(nums, n)
 	}
 	return nums, pre
 }
