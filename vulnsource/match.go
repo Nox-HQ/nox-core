@@ -1,6 +1,9 @@
 package vulnsource
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Version matching lives here, in the package both sides import, for the same
 // reason core/evidence owns the definition of CONFIRMED: a mirror and a client
@@ -278,6 +281,12 @@ func (v Verdict) String() string {
 // cannot be decided, and yields VerdictUndecidable rather than VerdictNotAffected unless another
 // entry or an ordered range already says Affected. A withdrawn advisory affects
 // nothing.
+//
+// The versions list is matched with the ecosystem's own notion of equality, as
+// OSV does (see matchList): PEP 440 for PyPI, exact strings elsewhere. A list
+// entry that is numerically equal to version but not equal by that rule
+// ("1.4" against "1.4.0" in npm) is VerdictUndecidable, never NotAffected,
+// because the mirror must not answer clean where OSV would say Affected.
 func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 	if r.Retracted() {
 		return VerdictNotAffected
@@ -291,7 +300,8 @@ func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 			!strings.EqualFold(aff.Package.Ecosystem, wireEcosystem) {
 			continue
 		}
-		if listsVersion(aff.Versions, version) {
+		listed := matchList(aff.Versions, eco(aff, wireEcosystem), version)
+		if listed == listEqual {
 			return VerdictAffected
 		}
 		ordered := Record{Affected: []Affected{{Package: aff.Package}}}
@@ -304,6 +314,12 @@ func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 		}
 		if sawOrdered && ordered.Affects(pkgName, wireEcosystem, version) {
 			return VerdictAffected
+		}
+		if listed == listNear {
+			// A list entry that is numerically the same version but spelled
+			// differently: OSV decides it with the ecosystem's own equality,
+			// which the mirror cannot vouch for. Not NotAffected.
+			undecidable = true
 		}
 		hasOther := len(aff.Ranges) > len(ordered.Affected[0].Ranges)
 		switch {
@@ -325,17 +341,131 @@ func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 	return VerdictNotAffected
 }
 
-// listsVersion reports whether the explicit list names version. Matching is
-// exact, tolerating only a leading "v", which Go-style tags carry and some
-// sources drop.
-func listsVersion(list []string, version string) bool {
+// listMatch is how an explicit versions list relates to a queried version.
+type listMatch int
+
+const (
+	// listAbsent: no entry equals the version by the ecosystem's own rule, and
+	// none is numerically equal to it either.
+	listAbsent listMatch = iota
+	// listNear: no entry is equal by the ecosystem's rule, but some entry is
+	// numerically equal under CompareVersions while spelled differently
+	// ("1.4" against "1.4.0"). The mirror cannot say whether OSV treats the
+	// two as one version.
+	listNear
+	// listEqual: an entry names the version by the ecosystem's own rule.
+	listEqual
+)
+
+// matchList relates the explicit list to version.
+//
+// OSV matches a package query against the versions list with the ecosystem's
+// native version comparison, so what "the same version" means depends on the
+// ecosystem. PyPI follows PEP 440, where 1.4 == 1.4.0; npm, Go and crates.io
+// follow SemVer, where those are distinct. The mirror must never decide
+// NotAffected where OSV would say Affected, so:
+//
+//   - PyPI entries equal under PEP 440 normalization are listEqual;
+//   - everywhere else only an exact match (leading "v" tolerated) is listEqual;
+//   - an entry that is not equal by that rule but is numerically equal under
+//     CompareVersions is listNear, which Decide turns into Undecidable so the
+//     caller asks live OSV. For PyPI this applies only when one side is not a
+//     well-formed PEP 440 version; two well-formed, different versions are
+//     different.
+func matchList(list []string, wireEcosystem, version string) listMatch {
 	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	pypi := strings.EqualFold(wireEcosystem, "PyPI")
+	vKey, vOK := pep440Key(version)
+	result := listAbsent
 	for _, s := range list {
 		if s == version || strings.TrimPrefix(s, "v") == v {
-			return true
+			return listEqual
+		}
+		if pypi && vOK {
+			if sKey, sOK := pep440Key(s); sOK {
+				if sKey == vKey {
+					return listEqual
+				}
+				continue
+			}
+		}
+		if ComparableVersion(s) && ComparableVersion(version) && CompareVersions(s, version) == 0 {
+			result = listNear
 		}
 	}
-	return false
+	return result
+}
+
+// pep440 matches a PEP 440 version in the spellings the specification
+// normalizes. Groups: 1 epoch, 2 release, 3-4 pre keyword and number, 5
+// implicit post number ("1.0-1"), 6-7 post keyword and number, 8-9 dev keyword
+// and number, 10 local segment.
+var pep440 = regexp.MustCompile(`^v?(?:(\d+)!)?(\d+(?:\.\d+)*)` +
+	`(?:[-_.]?(alpha|a|beta|b|preview|pre|c|rc)[-_.]?(\d+)?)?` +
+	`(?:-(\d+)|[-_.]?(post|rev|r)[-_.]?(\d+)?)?` +
+	`(?:[-_.]?(dev)[-_.]?(\d+)?)?` +
+	`(?:\+([a-z0-9]+(?:[-_.][a-z0-9]+)*))?$`)
+
+// pep440Key returns a canonical string such that two PEP 440 versions are
+// equal exactly when their keys are equal. The epoch is part of the key, so
+// "1!2.0" never equals "2.0". ok is false for anything the pattern does not
+// recognise; the caller must not claim equality or difference on that basis.
+func pep440Key(version string) (key string, ok bool) {
+	m := pep440.FindStringSubmatch(strings.ToLower(strings.TrimSpace(version)))
+	if m == nil {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString(trimZeros(m[1]) + "!")
+	rel := strings.Split(m[2], ".")
+	for len(rel) > 1 && trimZeros(rel[len(rel)-1]) == "0" {
+		rel = rel[:len(rel)-1]
+	}
+	for i := range rel {
+		rel[i] = trimZeros(rel[i])
+	}
+	b.WriteString(strings.Join(rel, "."))
+	if m[3] != "" {
+		pre := map[string]string{"alpha": "a", "a": "a", "beta": "b", "b": "b",
+			"c": "rc", "rc": "rc", "pre": "rc", "preview": "rc"}[m[3]]
+		b.WriteString("." + pre + trimZeros(m[4]))
+	}
+	switch {
+	case m[5] != "":
+		b.WriteString(".post" + trimZeros(m[5]))
+	case m[6] != "":
+		b.WriteString(".post" + trimZeros(m[7]))
+	}
+	if m[8] != "" {
+		b.WriteString(".dev" + trimZeros(m[9]))
+	}
+	if m[10] != "" {
+		segs := strings.FieldsFunc(m[10], func(r rune) bool { return r == '-' || r == '_' || r == '.' })
+		for i, seg := range segs {
+			if strings.Trim(seg, "0123456789") == "" {
+				segs[i] = trimZeros(seg)
+			}
+		}
+		b.WriteString("+" + strings.Join(segs, "."))
+	}
+	return b.String(), true
+}
+
+// trimZeros strips leading zeros from a digit string; "" and "000" become "0".
+func trimZeros(s string) string {
+	if t := strings.TrimLeft(s, "0"); t != "" {
+		return t
+	}
+	return "0"
+}
+
+// eco is the ecosystem to compare versions under: the caller's, else the one
+// the advisory entry names.
+func eco(aff Affected, wireEcosystem string) string {
+	if wireEcosystem != "" {
+		return wireEcosystem
+	}
+	return aff.Package.Ecosystem
 }
 
 // OrderedIntervals is AffectedIntervals restricted to the range types whose

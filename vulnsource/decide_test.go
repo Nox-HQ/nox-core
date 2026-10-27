@@ -127,3 +127,110 @@ func TestDecideRealHackneyRecords(t *testing.T) {
 		}
 	}
 }
+
+func listed(eco string, vers ...string) Record {
+	return Record{ID: "X", Affected: []Affected{{
+		Package:  Package{Name: "pkg", Ecosystem: eco},
+		Versions: vers,
+	}}}
+}
+
+// PYSEC-2013-19 and PYSEC-2022-304 as api.osv.dev serves them (details and
+// references trimmed). django 1.4.0 is affected through the explicit versions
+// list, which spells it "1.4"; neither ECOSYSTEM range covers it. OSV matches
+// them because PyPI versions compare under PEP 440, where 1.4 == 1.4.0.
+func TestDecideRealDjangoRecords(t *testing.T) {
+	for _, id := range []string{"PYSEC-2013-19", "PYSEC-2022-304"} {
+		b, err := os.ReadFile("testdata/" + id + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r Record
+		if err := json.Unmarshal(b, &r); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.Decide("django", "PyPI", "1.4.0"); got != VerdictAffected {
+			t.Errorf("%s django 1.4.0 = %v, want affected", id, got)
+		}
+		if got := r.Decide("django", "PyPI", "1.4"); got != VerdictAffected {
+			t.Errorf("%s django 1.4 = %v, want affected", id, got)
+		}
+		if got := r.Decide("django", "PyPI", "99.0"); got == VerdictAffected {
+			t.Errorf("%s django 99.0 must not be affected", id)
+		}
+	}
+}
+
+func TestDecideListedVersionEquality(t *testing.T) {
+	cases := []struct {
+		name string
+		eco  string
+		list []string
+		ver  string
+		want Verdict
+	}{
+		// PyPI: PEP 440 equality is affected.
+		{"pypi trailing zeros", "PyPI", []string{"1.4"}, "1.4.0", VerdictAffected},
+		{"pypi trailing zeros reverse", "PyPI", []string{"1.4.0"}, "1.4", VerdictAffected},
+		{"pypi four segments", "PyPI", []string{"1.4"}, "1.4.0.0", VerdictAffected},
+		{"pypi v prefix", "PyPI", []string{"1.4"}, "v1.4.0", VerdictAffected},
+		{"pypi case", "PyPI", []string{"1.0RC1"}, "1.0rc1", VerdictAffected},
+		{"pypi rc dot", "PyPI", []string{"1.0rc1"}, "1.0.rc1", VerdictAffected},
+		{"pypi rc dash", "PyPI", []string{"1.0-rc1"}, "1.0rc1", VerdictAffected},
+		{"pypi c is rc", "PyPI", []string{"1.0c1"}, "1.0rc1", VerdictAffected},
+		{"pypi alpha is a", "PyPI", []string{"1.0alpha2"}, "1.0a2", VerdictAffected},
+		{"pypi implicit pre number", "PyPI", []string{"1.0a"}, "1.0a0", VerdictAffected},
+		{"pypi post dot", "PyPI", []string{"1.0.post1"}, "1.0post1", VerdictAffected},
+		{"pypi implicit post", "PyPI", []string{"1.0-1"}, "1.0.post1", VerdictAffected},
+		{"pypi rev is post", "PyPI", []string{"1.0-rev1"}, "1.0.post1", VerdictAffected},
+		{"pypi dev dot", "PyPI", []string{"1.0.dev3"}, "1.0dev3", VerdictAffected},
+		{"pypi release then zeros then pre", "PyPI", []string{"1.0rc1"}, "1.0.0rc1", VerdictAffected},
+		{"pypi epoch equal", "PyPI", []string{"1!2.0"}, "1!2.0.0", VerdictAffected},
+		{"pypi local separators", "PyPI", []string{"1.0+ubuntu-1"}, "1.0+ubuntu.1", VerdictAffected},
+		{"pypi exact unchanged", "PyPI", []string{"1.4.0"}, "1.4.0", VerdictAffected},
+
+		// PyPI: distinct versions stay distinct.
+		{"pypi epoch mismatch listed", "PyPI", []string{"1!2.0"}, "2.0", VerdictNotAffected},
+		{"pypi epoch mismatch queried", "PyPI", []string{"2.0"}, "1!2.0", VerdictNotAffected},
+		{"pypi post is not the release", "PyPI", []string{"1.0.post1"}, "1.0", VerdictNotAffected},
+		{"pypi pre is not the release", "PyPI", []string{"1.0rc1"}, "1.0", VerdictNotAffected},
+		{"pypi rc1 is not rc2", "PyPI", []string{"1.0rc1"}, "1.0rc2", VerdictNotAffected},
+		{"pypi dev is not the release", "PyPI", []string{"1.0.dev1"}, "1.0", VerdictNotAffected},
+		{"pypi absent from list", "PyPI", []string{"1.4"}, "1.5.0", VerdictNotAffected},
+
+		// Not confidently normalizable and numerically equal: refuse to decide.
+		{"pypi exotic spelling", "PyPI", []string{"1.4.0.weird"}, "1.4", VerdictUndecidable},
+		{"pypi exotic query", "PyPI", []string{"1.4"}, "1.4.0.weird", VerdictUndecidable},
+
+		// Other ecosystems: "1.4" and "1.4.0" are distinct there, but numerically
+		// equal, so the mirror must not claim they differ.
+		{"npm list 1.4 vs 1.4.0", "npm", []string{"1.4"}, "1.4.0", VerdictUndecidable},
+		{"npm list 1.4.0 vs 1.4", "npm", []string{"1.4.0"}, "1.4", VerdictUndecidable},
+		{"go list vs v-prefixed zeros", "Go", []string{"v1.4"}, "1.4.0", VerdictUndecidable},
+		{"crates", "crates.io", []string{"1.4"}, "1.4.0", VerdictUndecidable},
+		{"npm exact unchanged", "npm", []string{"1.4.0"}, "1.4.0", VerdictAffected},
+		{"npm v prefix unchanged", "npm", []string{"v1.4.0"}, "1.4.0", VerdictAffected},
+		{"npm absent from list", "npm", []string{"1.4"}, "1.5.0", VerdictNotAffected},
+		{"npm distinct prerelease", "npm", []string{"1.4.0-beta"}, "1.4.0", VerdictNotAffected},
+	}
+	for _, c := range cases {
+		r := listed(c.eco, c.list...)
+		if got := r.Decide("pkg", c.eco, c.ver); got != c.want {
+			t.Errorf("%s: list %v ver %q: got %v, want %v", c.name, c.list, c.ver, got, c.want)
+		}
+	}
+}
+
+// A near-equal list entry must not mask an ordered range that does cover the
+// version, and must not turn an otherwise-decided miss into Undecidable when
+// the list holds only genuinely different versions.
+func TestDecideNearListEntryBesideRanges(t *testing.T) {
+	r := listed("npm", "1.4")
+	r.Affected[0].Ranges = []Range{rng("SEMVER", Event{Introduced: "0"}, Event{Fixed: "3.0.0"})}
+	if got := r.Decide("pkg", "npm", "1.4.0"); got != VerdictAffected {
+		t.Errorf("range covers: got %v, want affected", got)
+	}
+	if got := r.Decide("pkg", "npm", "5.0.0"); got != VerdictNotAffected {
+		t.Errorf("outside everything: got %v, want not-affected", got)
+	}
+}
