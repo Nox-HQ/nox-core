@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nox-hq/nox-core/degrade"
 	"github.com/nox-hq/nox-core/vulnsource"
@@ -85,7 +86,7 @@ func TestHydrateVulnDetails_CachesByID(t *testing.T) {
 // finding entirely is worse.
 func TestHydrateVulnDetails_FailsOpen(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusNotFound) // an answer, so no retry waits
 	}))
 	defer srv.Close()
 
@@ -178,6 +179,8 @@ func TestLookup_DetailFailureIsRecordedAsAdvisoryDetail(t *testing.T) {
 
 	deg := &degrade.Degradations{}
 	s := New(srv.URL, srv.Client(), deg)
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	s.retry = clock.policy(time.Second) // no retries, no waiting
 	out, err := s.Lookup(context.Background(), []vulnsource.Query{{Ecosystem: "go", Name: "example.com/m", Version: "1.0.0"}})
 	if err != nil {
 		t.Fatal(err)

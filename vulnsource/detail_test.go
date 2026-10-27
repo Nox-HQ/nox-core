@@ -78,7 +78,8 @@ func newDetailFake(name string, failed map[string]struct{}, ids ...string) *deta
 // used, so the failure is reported on the scan, as itself.
 func TestVerifying_IntelDetailFailureIsNotUnreachable(t *testing.T) {
 	intel := newDetailFake("nox-intel", failedSet("GHSA-a"), "GHSA-a", "GHSA-b")
-	ref := newDetailFake("osv.dev", nil, "GHSA-a", "GHSA-b")
+	// The reference fails on the same ID, so nothing can fill it.
+	ref := newDetailFake("osv.dev", failedSet("GHSA-a"), "GHSA-a", "GHSA-b")
 	v, out, deg := runDetail(t, intel, ref)
 
 	k := kindCounts(deg)
@@ -175,5 +176,75 @@ func TestVerifying_UnionedReferenceRecordWithoutDetailIsReported(t *testing.T) {
 	k := kindCounts(deg)
 	if k[degrade.AdvisoryDetail] != 1 || k[degrade.IntelUnreachable] != 1 || k[degrade.OSV] != 0 {
 		t.Errorf("unreachable-intel union: %v", deg.Items())
+	}
+}
+
+// hydrated builds a record the way a successful detail fetch leaves it.
+func hydrated(id, modified, summary string) Record {
+	return Record{ID: id, Modified: modified, Summary: summary, Severity: []Severity{{Type: "CVSS_V3", Score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}}}
+}
+
+// bare builds one that failed to hydrate: the batch answer's {id, modified}.
+func bare(id, modified string) Record { return Record{ID: id, Modified: modified} }
+
+func runFill(t *testing.T, intelRecs, refRecs []Record, intelFailed, refFailed map[string]struct{}) (map[int][]Record, *degrade.Degradations) {
+	t.Helper()
+	intel := &detailFake{fakeSource: &fakeSource{name: "nox-intel", recs: map[string][]Record{"lodash": intelRecs}}, failed: intelFailed}
+	ref := &detailFake{fakeSource: &fakeSource{name: "osv.dev", recs: map[string][]Record{"lodash": refRecs}}, failed: refFailed}
+	_, out, deg := runDetail(t, intel, ref)
+	return out, deg
+}
+
+// Both sources hydrate the same IDs, so one side's missing detail can come from
+// the other. The record stays the using side's own; only advisory content moves.
+func TestVerifying_IntelDetailFailureIsFilledFromReference(t *testing.T) {
+	intelRec := bare("GHSA-a", "2026-01-01T00:00:00Z")
+	intelRec.Intelligence = &Intelligence{Status: StatusCandidate}
+	intelRec.Provenance = []Provenance{{Source: "osv.dev", Via: "mirror"}}
+	refRec := hydrated("GHSA-a", "2026-01-01T00:00:00Z", "from the reference")
+	refRec.Provenance = []Provenance{{Source: "osv.dev", Via: "live"}}
+
+	out, deg := runFill(t, []Record{intelRec}, []Record{refRec}, failedSet("GHSA-a"), nil)
+
+	if deg.Len() != 0 {
+		t.Errorf("a filled record was reported: %+v", deg.Items())
+	}
+	got := out[0][0]
+	if got.Summary != "from the reference" || len(got.Severity) != 1 {
+		t.Errorf("detail not filled: %+v", got)
+	}
+	if got.Intelligence == nil || got.Intelligence.Status != StatusCandidate || got.Provenance[0].Via != "mirror" {
+		t.Errorf("the using side's annotations were overwritten: %+v", got)
+	}
+}
+
+// Neither side could supply the detail: that, and only that, is reported, and
+// it names the ID.
+func TestVerifying_DetailFailingOnBothSidesIsReported(t *testing.T) {
+	out, deg := runFill(t,
+		[]Record{bare("GHSA-a", "2026-01-01T00:00:00Z"), hydrated("GHSA-ok", "", "ok")},
+		[]Record{bare("GHSA-a", "2026-01-01T00:00:00Z"), hydrated("GHSA-ok", "", "ok")},
+		failedSet("GHSA-a"), failedSet("GHSA-a"))
+
+	items := deg.Items()
+	if len(items) != 1 || items[0].Kind != degrade.AdvisoryDetail ||
+		!strings.Contains(items[0].Detail, "1 findings kept a default severity") ||
+		!strings.Contains(items[0].Detail, "GHSA-a") || strings.Contains(items[0].Detail, "GHSA-ok") {
+		t.Errorf("degradations = %+v", items)
+	}
+	if len(out[0]) != 2 {
+		t.Errorf("a record was lost: %+v", out)
+	}
+}
+
+// The failed side's batch stamp is newer than the other side's detail: that
+// detail describes an older version of the advisory and must not stand in.
+func TestVerifying_StaleDonorDetailIsNotUsedToFill(t *testing.T) {
+	out, deg := runFill(t,
+		[]Record{bare("GHSA-a", "2026-03-01T00:00:00Z")},
+		[]Record{hydrated("GHSA-a", "2026-01-01T00:00:00Z", "older")},
+		failedSet("GHSA-a"), nil)
+	if out[0][0].Summary != "" || deg.Len() != 1 {
+		t.Errorf("an older version filled a newer record: out=%+v deg=%+v", out[0][0], deg.Items())
 	}
 }
