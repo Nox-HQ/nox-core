@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nox-hq/nox-core/degrade"
 )
@@ -69,6 +70,13 @@ type Verification struct {
 	// Suppressed lists records the reference published and the intelligence
 	// source did not return. Any entry means the superset property failed.
 	Suppressed []Discrepancy
+
+	// Lagged lists records the reference published after the intelligence
+	// source's mirror last synced, which the source therefore could not have
+	// returned. They are restored into the answer like suppressed ones but do
+	// not fail the superset property: lag is expected behaviour of a mirror,
+	// not evidence of withholding, and it needs no degradation.
+	Lagged []Discrepancy
 
 	// Added lists records only the intelligence source returned — what the
 	// richer source is actually buying.
@@ -211,6 +219,11 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 		partial = pr.PartialQueries()
 	}
 
+	var synced map[int]time.Time
+	if mr, ok := v.intel.(MirrorSyncReporter); ok {
+		synced = mr.MirrorSyncedAt()
+	}
+
 	result := Verification{Checked: true}
 	for i, q := range qs {
 		have := idSet(intelOut[i])
@@ -222,6 +235,15 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 			if truncated {
 				// The source said this answer was partial. Restoring what it
 				// did not return is right; calling that withholding is not.
+				intelOut[i] = append(intelOut[i], ref)
+				continue
+			}
+			if postdatesSync(ref, synced[i]) {
+				// The mirror answered completely as of its last sync, and
+				// this record changed after it. Restore it; it is lag.
+				result.Lagged = append(result.Lagged, Discrepancy{
+					Query: q, VulnID: ref.ID, Status: StatusPublished,
+				})
 				intelOut[i] = append(intelOut[i], ref)
 				continue
 			}
@@ -244,6 +266,7 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 	}
 
 	sortDiscrepancies(result.Suppressed)
+	sortDiscrepancies(result.Lagged)
 	sortDiscrepancies(result.Added)
 
 	if len(result.Suppressed) > 0 {
@@ -258,6 +281,26 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 
 	v.setResult(result)
 	return intelOut, nil
+}
+
+// postdatesSync reports whether the reference record was changed strictly after
+// the mirror's last sync, which is the only thing that excuses its absence from
+// a complete mirror answer. Everything unprovable fails closed: no sync time, or
+// no parseable Modified (Published when Modified is empty), is not lag. A record
+// last touched at or before the sync was in the corpus the mirror answered from.
+func postdatesSync(ref Record, syncedAt time.Time) bool {
+	if syncedAt.IsZero() {
+		return false
+	}
+	stamp := ref.Modified
+	if stamp == "" {
+		stamp = ref.Published
+	}
+	t, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		return false
+	}
+	return t.After(syncedAt)
 }
 
 // forwardIncomplete copies the intelligence source's IntelIncomplete

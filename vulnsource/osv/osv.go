@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nox-hq/nox-core/degrade"
 	"github.com/nox-hq/nox-core/vulnsource"
@@ -162,6 +163,20 @@ func (r BatchResult) Completeness() Completeness {
 	}
 }
 
+// mirrorSyncedAt returns the mirror's sync time when, and only when, the result
+// is a complete answer from the mirror with a parseable time. A degraded mirror
+// answer is Partial and handled as such; it never earns the lag excuse.
+func (r BatchResult) mirrorSyncedAt() (time.Time, bool) {
+	if r.Completeness() != Complete || r.Coverage.Source != "mirror" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, r.Coverage.MirrorSyncedAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 // partialReason renders why a Partial result is partial, for a degradation. It
 // names what was not consulted, so "degraded" is never left to be guessed at.
 func (c Coverage) partialReason() string {
@@ -205,9 +220,60 @@ type Source struct {
 	// acceptDegraded sends X-Nox-Accept-Degraded: mirror on batch lookups.
 	acceptDegraded bool
 
+	// capabilities are sent as X-Nox-Client-Capabilities on batch lookups.
+	capabilities []string
+
 	// partial holds the query indices the most recent Lookup was told were
 	// answered incompletely. It is shared by copies made with WithCache.
 	partial *partialIndex
+
+	// mirror holds, for the most recent Lookup, the sync time of each query
+	// answered complete-from-mirror. Shared by copies, like partial.
+	mirror *mirrorIndex
+}
+
+// mirrorIndex is the mutex-guarded set behind MirrorSyncedAt.
+type mirrorIndex struct {
+	mu     sync.Mutex
+	synced map[int]time.Time
+}
+
+// MirrorSyncedAt returns, by index into the most recent Lookup's queries, when
+// the service's mirror last synced for each query it answered completely from
+// that mirror. It implements vulnsource.MirrorSyncReporter. A mirror answer
+// whose sync time is absent or unparseable is left out: lag cannot be claimed
+// on a time nobody can read.
+func (s *Source) MirrorSyncedAt() map[int]time.Time {
+	out := make(map[int]time.Time)
+	s.mirror.mu.Lock()
+	defer s.mirror.mu.Unlock()
+	for i, t := range s.mirror.synced {
+		out[i] = t
+	}
+	return out
+}
+
+// CapabilitiesHeader is the request header by which a client declares what it
+// can interpret, so NOX Intelligence may answer in ways an older client would
+// misread. Tokens are comma-separated.
+//
+// CapabilityMirrorLag says the client can tell a mirror's sync lag from
+// withholding (see vulnsource.MirrorSyncReporter), which is what lets the
+// service answer from its local corpus instead of live OSV.
+const (
+	CapabilitiesHeader  = "X-Nox-Client-Capabilities"
+	CapabilityMirrorLag = "mirror-lag"
+)
+
+// WithCapabilities returns a copy that declares caps on every batch lookup. It
+// is for the NOX Intelligence source only, and only for capabilities the caller
+// actually implements: OSV.dev does not know the header, and declaring mirror-lag
+// without a verifier that applies the lag rule would accept stale answers as
+// complete.
+func (s *Source) WithCapabilities(caps ...string) *Source {
+	out := *s
+	out.capabilities = append([]string(nil), caps...)
+	return &out
 }
 
 // partialIndex is the mutex-guarded set behind PartialQueries.
@@ -279,7 +345,7 @@ func NewNamed(name, baseURL string, client *http.Client, deg *degrade.Degradatio
 	if name == "" {
 		name = "osv.dev"
 	}
-	return &Source{name: name, baseURL: baseURL, client: client, deg: deg, partial: &partialIndex{}}
+	return &Source{name: name, baseURL: baseURL, client: client, deg: deg, partial: &partialIndex{}, mirror: &mirrorIndex{}}
 }
 
 // Name identifies this source in degradation records and provenance.
@@ -377,6 +443,7 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 	wg.Wait()
 
 	var partial []partialQuery
+	synced := make(map[int]time.Time)
 	for j, job := range jobs {
 		if err := failures[j]; err != nil {
 			// Degrade gracefully, but say so: a silent empty result is
@@ -395,12 +462,18 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 			if len(br.Vulns) > 0 {
 				result[job.items[i].orig] = br.Vulns
 			}
+			if t, ok := br.mirrorSyncedAt(); ok {
+				synced[job.items[i].orig] = t
+			}
 			if br.Completeness() == Partial {
 				partial = append(partial, partialQuery{idx: job.items[i].orig, q: job.items[i].q, why: br.Coverage.partialReason(), mirror: br.Coverage.fromMirror()})
 			}
 		}
 	}
 	s.recordPartial(ctx, partial)
+	s.mirror.mu.Lock()
+	s.mirror.synced = synced
+	s.mirror.mu.Unlock()
 
 	// /v1/querybatch returns only {id, modified}; fetch the detail that
 	// severity mapping and import-path scoping depend on. Each result slice is
@@ -474,6 +547,9 @@ func (s *Source) queryBatch(ctx context.Context, url string, body []byte) ([]Bat
 		return nil, fmt.Errorf("creating OSV request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if len(s.capabilities) > 0 {
+		req.Header.Set(CapabilitiesHeader, strings.Join(s.capabilities, ","))
+	}
 	if s.acceptDegraded {
 		req.Header.Set(AcceptDegradedHeader, AcceptDegradedMirror)
 	}
@@ -604,6 +680,9 @@ func applyVulnDetails(vulns []vulnsource.Record, details map[string]vulnsource.R
 		}
 		if detail.Modified != "" {
 			vulns[i].Modified = detail.Modified
+		}
+		if detail.Published != "" {
+			vulns[i].Published = detail.Published
 		}
 		if detail.Withdrawn != "" {
 			vulns[i].Withdrawn = detail.Withdrawn

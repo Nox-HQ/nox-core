@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nox-hq/nox-core/degrade"
 	"github.com/nox-hq/nox-core/vulnsource"
@@ -193,4 +194,66 @@ func (c *memCache) Put(id, v string, r vulnsource.Record) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.m[id+"@"+v] = r
+}
+
+const mirrorCompleteWire = `{"results":[
+ {"vulns":[{"id":"GHSA-m","modified":"2026-05-01T00:00:00Z"}],"nox_coverage":{"status":"complete","source":"mirror","mirror_synced_at":"2026-10-27T04:00:00Z"}},
+ {"vulns":[{"id":"GHSA-n","modified":"2026-05-01T00:00:00Z"}],"nox_coverage":{"status":"complete","source":"mirror","mirror_synced_at":"not a time"}},
+ {"vulns":[{"id":"GHSA-l","modified":"2026-05-01T00:00:00Z"}],"nox_coverage":{"status":"complete"}},
+ {"vulns":[{"id":"GHSA-d","modified":"2026-05-01T00:00:00Z"}],"nox_coverage":{"status":"degraded","source":"mirror","mirror_synced_at":"2026-10-27T04:00:00Z","missing":["osv_live"]}}
+]}`
+
+// A complete mirror answer is Complete, not Partial, and reports its sync time;
+// only a parseable time on a complete mirror answer counts.
+func TestLookup_CompleteMirrorAnswerReportsSyncTime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/vulns/") {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(mirrorCompleteWire))
+	}))
+	defer srv.Close()
+	deg := &degrade.Degradations{}
+	src := NewNamed("nox-intelligence", srv.URL, srv.Client(), deg)
+	if _, err := src.Lookup(context.Background(), npmQueries("a", "b", "c", "d")); err != nil {
+		t.Fatal(err)
+	}
+	got := src.MirrorSyncedAt()
+	want := time.Date(2026, 10, 27, 4, 0, 0, 0, time.UTC)
+	if len(got) != 1 || !got[0].Equal(want) {
+		t.Errorf("MirrorSyncedAt = %v, want only {0: %v}", got, want)
+	}
+	if _, partial := src.PartialQueries()[0]; partial {
+		t.Error("a complete mirror answer was read as partial")
+	}
+	if _, partial := src.PartialQueries()[3]; !partial {
+		t.Error("a degraded mirror answer must stay partial")
+	}
+}
+
+// Capabilities are sent only by a source that declares them: the reference
+// (api.osv.dev) must never see a header it does not understand.
+func TestLookup_CapabilitiesHeaderOnlyWhenDeclared(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/querybatch" {
+			mu.Lock()
+			seen = append(seen, r.Header.Get(CapabilitiesHeader))
+			mu.Unlock()
+		}
+		_, _ = w.Write([]byte(`{"results":[{}]}`))
+	}))
+	defer srv.Close()
+	qs := npmQueries("a")
+	if _, err := New(srv.URL, srv.Client(), nil).Lookup(context.Background(), qs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewNamed("nox-intelligence", srv.URL, srv.Client(), nil).WithCapabilities(CapabilityMirrorLag).Lookup(context.Background(), qs); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[0] != "" || seen[1] != "mirror-lag" {
+		t.Errorf("header per request = %q, want [\"\" \"mirror-lag\"]", seen)
+	}
 }
