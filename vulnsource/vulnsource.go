@@ -23,7 +23,10 @@
 // do not reshape it.
 package vulnsource
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Query is one package to look up. Ecosystem is nox's own internal ecosystem
 // name ("go", "npm", "pypi", ...); mapping it to a wire vocabulary belongs to
@@ -56,6 +59,10 @@ type Record struct {
 	// hides the trade; keying on the publisher's own stamp does not trade
 	// anything.
 	Modified string `json:"modified,omitempty"`
+
+	// Published is when the source database first published the advisory (RFC3339).
+	// It is the fallback the verifier dates a record by when Modified is absent.
+	Published string `json:"published,omitempty"`
 
 	// Withdrawn is set when the source database has retracted the advisory,
 	// as an RFC3339 timestamp. A withdrawn advisory is not a vulnerability.
@@ -230,4 +237,15 @@ type Source interface {
 // do not implement it are verified exactly as before.
 type PartialReporter interface {
 	PartialQueries() map[int]struct{}
+}
+
+// MirrorSyncReporter is an optional interface for a Source that can answer
+// completely from a local mirror of its reference database. It returns, for the
+// queries of its most recent Lookup answered complete-from-mirror, when that
+// mirror last synced. A verifier uses it to tell lag from withholding: a
+// reference record changed after the sync cannot be in the mirror, so its
+// absence is expected rather than evidence of suppression. A query absent from
+// the map, or mapped to the zero time, has no such excuse.
+type MirrorSyncReporter interface {
+	MirrorSyncedAt() map[int]time.Time
 }

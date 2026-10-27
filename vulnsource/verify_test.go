@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/nox-hq/nox-core/degrade"
 )
@@ -400,5 +401,114 @@ func TestVerifying_IncompleteAnswerIsNotUnreachable(t *testing.T) {
 	}
 	if !v.Verification().Checked {
 		t.Error("the reference check did not run because the source answered incompletely")
+	}
+}
+
+// mirrorFake is an intelligence source that, like osv.Source, reports the
+// mirror sync time of the queries it answered completely from the mirror.
+type mirrorFake struct {
+	*fakeSource
+	synced map[int]time.Time
+}
+
+func (m *mirrorFake) MirrorSyncedAt() map[int]time.Time { return m.synced }
+
+var mirrorT = time.Date(2026, 10, 27, 4, 0, 0, 0, time.UTC)
+
+func lagRun(t *testing.T, ref Record, synced map[int]time.Time) (Verification, []Record, *degrade.Degradations) {
+	t.Helper()
+	intel := &mirrorFake{fakeSource: &fakeSource{name: "nox-intel", recs: map[string][]Record{"lodash": {rec("GHSA-have")}}}, synced: synced}
+	r := &fakeSource{name: "osv.dev", recs: map[string][]Record{"lodash": {rec("GHSA-have"), ref}}}
+	deg := &degrade.Degradations{}
+	v := NewVerifying(func(*degrade.Degradations) Source { return intel }, func(*degrade.Degradations) Source { return r }, deg)
+	out, err := v.Lookup(context.Background(), queries("lodash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v.Verification(), out[0], deg
+}
+
+// A record published after the mirror last synced cannot be in the mirror. Not
+// returning it is lag: it is restored, counted, and is not a suppression.
+func TestVerifying_RecordNewerThanMirrorIsLagNotSuppression(t *testing.T) {
+	ref := Record{ID: "GHSA-new", Modified: mirrorT.Add(time.Hour).Format(time.RFC3339)}
+	ver, out, deg := lagRun(t, ref, map[int]time.Time{0: mirrorT})
+	if len(ver.Lagged) != 1 || ver.Lagged[0].VulnID != "GHSA-new" {
+		t.Fatalf("Lagged = %+v, want GHSA-new", ver.Lagged)
+	}
+	if len(ver.Suppressed) != 0 || !ver.Holds() {
+		t.Errorf("lag was counted as suppression: %+v", ver.Suppressed)
+	}
+	if len(out) != 2 {
+		t.Errorf("lagged record not restored: %v", out)
+	}
+	if deg.Len() != 0 {
+		t.Errorf("lag degraded the scan: %+v", deg.Items())
+	}
+}
+
+// Published stands in for modified only when modified is absent.
+func TestVerifying_LagFallsBackToPublished(t *testing.T) {
+	ref := Record{ID: "GHSA-new", Published: mirrorT.Add(time.Minute).Format(time.RFC3339)}
+	ver, _, _ := lagRun(t, ref, map[int]time.Time{0: mirrorT})
+	if len(ver.Lagged) != 1 || len(ver.Suppressed) != 0 {
+		t.Errorf("lagged=%v suppressed=%v", ver.Lagged, ver.Suppressed)
+	}
+}
+
+// A record the mirror had already synced past must have been returned: missing
+// it is withholding, at the boundary too (strictly after).
+func TestVerifying_RecordNotNewerThanMirrorIsStillSuppression(t *testing.T) {
+	for name, mod := range map[string]time.Time{"before": mirrorT.Add(-time.Hour), "equal": mirrorT} {
+		t.Run(name, func(t *testing.T) {
+			ref := Record{ID: "GHSA-old", Modified: mod.Format(time.RFC3339)}
+			ver, out, deg := lagRun(t, ref, map[int]time.Time{0: mirrorT})
+			if len(ver.Suppressed) != 1 || len(ver.Lagged) != 0 || ver.Holds() {
+				t.Fatalf("suppressed=%v lagged=%v", ver.Suppressed, ver.Lagged)
+			}
+			if len(out) != 2 {
+				t.Errorf("suppressed record not restored: %v", out)
+			}
+			if deg.Len() != 1 || deg.Items()[0].Kind != degrade.IntelSuppression {
+				t.Errorf("degradations = %+v", deg.Items())
+			}
+		})
+	}
+}
+
+// Without a usable sync time, or a usable record time, lag cannot be shown, and
+// what cannot be shown fails closed.
+func TestVerifying_LagUnprovableFailsClosed(t *testing.T) {
+	newer := mirrorT.Add(time.Hour).Format(time.RFC3339)
+	cases := map[string]struct {
+		ref    Record
+		synced map[int]time.Time
+	}{
+		"no sync time":        {Record{ID: "X", Modified: newer}, nil},
+		"zero sync time":      {Record{ID: "X", Modified: newer}, map[int]time.Time{0: {}}},
+		"garbled record time": {Record{ID: "X", Modified: "yesterday"}, map[int]time.Time{0: mirrorT}},
+		"no record time":      {Record{ID: "X"}, map[int]time.Time{0: mirrorT}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			ver, _, _ := lagRun(t, c.ref, c.synced)
+			if len(ver.Suppressed) != 1 || len(ver.Lagged) != 0 {
+				t.Errorf("suppressed=%v lagged=%v", ver.Suppressed, ver.Lagged)
+			}
+		})
+	}
+}
+
+// A source that does not report mirror sync (a live answer) is verified exactly
+// as before, however new the missing record is.
+func TestVerifying_LiveAnswerIgnoresLagRule(t *testing.T) {
+	intel := &fakeSource{name: "nox-intel", recs: map[string][]Record{"lodash": {rec("GHSA-have")}}}
+	ref := &fakeSource{name: "osv.dev", recs: map[string][]Record{"lodash": {rec("GHSA-have"), {ID: "GHSA-new", Modified: "2099-01-01T00:00:00Z"}}}}
+	v := verifying(intel, ref, &degrade.Degradations{})
+	if _, err := v.Lookup(context.Background(), queries("lodash")); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Verification(); len(got.Suppressed) != 1 || len(got.Lagged) != 0 {
+		t.Errorf("suppressed=%v lagged=%v", got.Suppressed, got.Lagged)
 	}
 }
