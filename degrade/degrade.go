@@ -14,6 +14,18 @@ const (
 	// dependency vulnerabilities are under-reported.
 	OSV Kind = "osv_lookup"
 
+	// AdvisoryDetail means the follow-up fetch that supplies an advisory's
+	// severity, summary and affected ranges failed for some records, so those
+	// records kept a default severity and a severity gate (fail_on: high) may
+	// not see them.
+	//
+	// It is deliberately not OSV. A detail failure says nothing about whether
+	// the lookup reached its source or whether the right IDs were returned, and
+	// a verifier that reads every degradation on a source's collector as that
+	// source failing would call a source unreachable (or unverified) over it.
+	// Verifiers therefore exclude this kind when judging reachability.
+	AdvisoryDetail Kind = "advisory_detail"
+
 	// Lockfile means a lockfile was found but could not be parsed,
 	// so its packages are absent from the inventory and from vulnerability
 	// matching.

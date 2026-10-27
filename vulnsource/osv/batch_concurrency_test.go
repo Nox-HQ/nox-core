@@ -16,12 +16,12 @@ import (
 
 // batchServer answers /v1/querybatch after delay, reporting one advisory for
 // every query whose package name is "vuln-<n>"; fail picks batches (by their
-// first package's index) to answer 500 instead. /v1/vulns/* is 404 so
-// hydration fails open.
+// first package's index) to answer 500 instead. /v1/vulns/* answers a bare
+// record, so hydration succeeds and a lookup records only what the batch did.
 func batchServer(t *testing.T, delay time.Duration, fail func(first string) bool, inFlight, peak *atomic.Int32) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/vulns/") {
-			http.Error(w, "not found", http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"id":"` + strings.TrimPrefix(r.URL.Path, "/v1/vulns/") + `"}`))
 			return
 		}
 		n := inFlight.Add(1)
