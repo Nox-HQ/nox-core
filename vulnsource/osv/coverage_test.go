@@ -99,7 +99,9 @@ func lookupWire(t *testing.T, wire string, qs []vulnsource.Query) (map[int][]vul
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/vulns/") {
-			http.Error(w, "nope", http.StatusNotFound)
+			// A bare record: hydration succeeds, so these tests see only what
+			// the batch answer itself degrades.
+			_, _ = w.Write([]byte(`{"id":"` + strings.TrimPrefix(r.URL.Path, "/v1/vulns/") + `"}`))
 			return
 		}
 		w.Header().Set("X-Nox-Intel-Incomplete", "2")

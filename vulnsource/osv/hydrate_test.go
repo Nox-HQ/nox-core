@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/nox-hq/nox-core/degrade"
 	"github.com/nox-hq/nox-core/vulnsource"
 )
 
@@ -83,7 +86,7 @@ func TestHydrateVulnDetails_CachesByID(t *testing.T) {
 // finding entirely is worse.
 func TestHydrateVulnDetails_FailsOpen(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusNotFound) // an answer, so no retry waits
 	}))
 	defer srv.Close()
 
@@ -155,5 +158,45 @@ func TestApplyVulnDetails_CopiesEveryField(t *testing.T) {
 				"applyVulnDetails; it will be empty for every scan in production",
 				got.Type().Field(i).Name)
 		}
+	}
+}
+
+// A detail fetch that fails leaves the record at its default severity. That is
+// recorded on the scan as AdvisoryDetail — not OSV, which would read as the
+// lookup failing — and the failed ID is available to a verifier.
+func TestLookup_DetailFailureIsRecordedAsAdvisoryDetail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/querybatch":
+			_, _ = w.Write([]byte(`{"results":[{"vulns":[{"id":"GO-1","modified":"2026-01-01T00:00:00Z"},{"id":"GO-2","modified":"2026-01-01T00:00:00Z"}]}]}`))
+		case "/v1/vulns/GO-1":
+			_, _ = w.Write([]byte(`{"id":"GO-1","summary":"s"}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	deg := &degrade.Degradations{}
+	s := New(srv.URL, srv.Client(), deg)
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	s.retry = clock.policy(time.Second) // no retries, no waiting
+	out, err := s.Lookup(context.Background(), []vulnsource.Query{{Ecosystem: "go", Name: "example.com/m", Version: "1.0.0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out[0]) != 2 {
+		t.Fatalf("a detail failure lost a finding: %+v", out)
+	}
+	items := deg.Items()
+	if len(items) != 1 || items[0].Kind != degrade.AdvisoryDetail ||
+		!strings.Contains(items[0].Detail, "1 findings kept a default severity; a severity gate may not see them") ||
+		!strings.Contains(items[0].Detail, "GO-2") {
+		t.Errorf("degradations = %+v", items)
+	}
+	if got := s.DetailFailures(); len(got) != 1 {
+		t.Errorf("DetailFailures = %v, want only GO-2", got)
+	} else if _, ok := got["GO-2"]; !ok {
+		t.Errorf("DetailFailures = %v, want GO-2", got)
 	}
 }

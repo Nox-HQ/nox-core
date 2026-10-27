@@ -230,6 +230,35 @@ type Source struct {
 	// mirror holds, for the most recent Lookup, the sync time of each query
 	// answered complete-from-mirror. Shared by copies, like partial.
 	mirror *mirrorIndex
+
+	// detail holds the advisory IDs whose detail fetch failed in the most recent
+	// Lookup. Shared by copies, like partial.
+	detail *detailIndex
+
+	// retry paces repeated attempts at a failed detail fetch. The zero value
+	// means defaultRetry; tests inject a clock so they never sleep.
+	retry retryPolicy
+}
+
+// detailIndex is the mutex-guarded set behind DetailFailures.
+type detailIndex struct {
+	mu     sync.Mutex
+	failed map[string]struct{}
+}
+
+// DetailFailures returns the advisory IDs whose detail fetch failed in the most
+// recent Lookup, so those records kept a default severity. It implements
+// vulnsource.DetailFailureReporter, which lets a verifier decide which of a
+// source's records the scan actually uses without reading a failed detail fetch
+// as the source failing.
+func (s *Source) DetailFailures() map[string]struct{} {
+	out := make(map[string]struct{})
+	s.detail.mu.Lock()
+	defer s.detail.mu.Unlock()
+	for id := range s.detail.failed {
+		out[id] = struct{}{}
+	}
+	return out
 }
 
 // mirrorIndex is the mutex-guarded set behind MirrorSyncedAt.
@@ -345,7 +374,7 @@ func NewNamed(name, baseURL string, client *http.Client, deg *degrade.Degradatio
 	if name == "" {
 		name = "osv.dev"
 	}
-	return &Source{name: name, baseURL: baseURL, client: client, deg: deg, partial: &partialIndex{}, mirror: &mirrorIndex{}}
+	return &Source{name: name, baseURL: baseURL, client: client, deg: deg, partial: &partialIndex{}, mirror: &mirrorIndex{}, detail: &detailIndex{}}
 }
 
 // Name identifies this source in degradation records and provenance.
@@ -481,12 +510,37 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 	// randomised and rebuilding the map from a flattened slice would attribute
 	// vulnerabilities to the wrong packages.
 	ids, validators := needed(s.cache, result)
-	details := fetchVulnDetails(ctx, s.client, s.baseURL, s.cache, validators, ids)
+	details, failedIDs := fetchVulnDetails(ctx, s.client, s.baseURL, s.cache, validators, ids, s.retry)
 	for _, vs := range result {
 		applyVulnDetails(vs, details)
 	}
+	s.recordDetailFailures(result, failedIDs)
 
 	return result, nil
+}
+
+// recordDetailFailures reports the records that stayed unhydrated. A record
+// without detail keeps a default severity, so a critical advisory can sit below
+// a fail_on gate with nothing on the scan saying so. The kind is
+// degrade.AdvisoryDetail, not OSV: it does not mean the lookup failed.
+func (s *Source) recordDetailFailures(result map[int][]vulnsource.Record, failedIDs []string) {
+	set := make(map[string]struct{}, len(failedIDs))
+	for _, id := range failedIDs {
+		set[id] = struct{}{}
+	}
+	s.detail.mu.Lock()
+	s.detail.failed = set
+	s.detail.mu.Unlock()
+
+	findings := 0
+	for _, vs := range result {
+		for _, r := range vs {
+			if _, bad := set[r.ID]; bad {
+				findings++
+			}
+		}
+	}
+	vulnsource.ReportAdvisoryDetail(s.deg, s.name, findings, failedIDs)
 }
 
 type partialQuery struct {
@@ -579,7 +633,8 @@ func HydrateDetails(ctx context.Context, client *http.Client, baseURL string, vu
 	for _, v := range vulns {
 		ids = append(ids, v.ID)
 	}
-	applyVulnDetails(vulns, fetchVulnDetails(ctx, client, baseURL, nil, nil, ids))
+	details, _ := fetchVulnDetails(ctx, client, baseURL, nil, nil, ids, retryPolicy{})
+	applyVulnDetails(vulns, details)
 }
 
 // needed returns the advisory ids that must be fetched from upstream: those the
@@ -618,8 +673,12 @@ func needed(cache AdvisoryCache, result map[int][]vulnsource.Record) (ids []stri
 
 // fetchVulnDetails retrieves advisory detail for each distinct ID, concurrently
 // and at most once per ID. IDs that cannot be fetched are simply absent from
-// the returned map, which callers treat as "leave the finding as it is".
-func fetchVulnDetails(ctx context.Context, client *http.Client, baseURL string, cache AdvisoryCache, validators map[string]string, ids []string) map[string]vulnsource.Record {
+// the returned map, which callers treat as "leave the finding as it is" — and
+// are returned by ID, sorted, so the caller can say which records kept a default
+// severity.
+func fetchVulnDetails(ctx context.Context, client *http.Client, baseURL string, cache AdvisoryCache, validators map[string]string, ids []string, rp retryPolicy) (map[string]vulnsource.Record, []string) {
+	rp = rp.orDefault()
+	deadline := rp.now().Add(rp.budget)
 	unique := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		if id != "" {
@@ -627,13 +686,13 @@ func fetchVulnDetails(ctx context.Context, client *http.Client, baseURL string, 
 		}
 	}
 	if len(unique) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var (
-		mu       sync.Mutex
-		wg       sync.WaitGroup
-		failures int
+		mu     sync.Mutex
+		wg     sync.WaitGroup
+		failed []string
 	)
 	out := make(map[string]vulnsource.Record, len(unique))
 	sem := make(chan struct{}, hydrateConcurrency)
@@ -645,11 +704,15 @@ func fetchVulnDetails(ctx context.Context, client *http.Client, baseURL string, 
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			detail, err := fetchVulnDetail(ctx, client, baseURL, id)
+			detail, err := fetchVulnDetailRetrying(ctx, client, baseURL, id, rp, deadline)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				failures++
+				// A cancelled lookup observed nothing about the source; saying
+				// it failed would be a claim nobody checked.
+				if ctx.Err() == nil {
+					failed = append(failed, id)
+				}
 				return
 			}
 			if cache != nil {
@@ -663,69 +726,22 @@ func fetchVulnDetails(ctx context.Context, client *http.Client, baseURL string, 
 	}
 	wg.Wait()
 
-	if failures > 0 {
+	sort.Strings(failed)
+	if len(failed) > 0 {
 		slog.WarnContext(ctx, "OSV detail lookup failed for some advisories; severity may be under-reported",
-			"failed", failures, "total", len(unique))
+			"failed", len(failed), "total", len(unique))
 	}
-	return out
+	return out, failed
 }
 
 // applyVulnDetails copies fetched detail onto the matching entries in vulns,
-// in place. Only fields the batch response could not supply are overwritten.
+// in place. Only fields the batch response could not supply are overwritten;
+// the merge itself is vulnsource.Record.ApplyDetail, which the verifier reuses
+// to fill one source's missing detail from the other.
 func applyVulnDetails(vulns []vulnsource.Record, details map[string]vulnsource.Record) {
 	for i := range vulns {
-		detail, ok := details[vulns[i].ID]
-		if !ok {
-			continue
-		}
-		if detail.Modified != "" {
-			vulns[i].Modified = detail.Modified
-		}
-		if detail.Published != "" {
-			vulns[i].Published = detail.Published
-		}
-		if detail.Withdrawn != "" {
-			vulns[i].Withdrawn = detail.Withdrawn
-		}
-		if detail.Summary != "" {
-			vulns[i].Summary = detail.Summary
-		}
-		if detail.Details != "" {
-			vulns[i].Details = detail.Details
-		}
-		if len(detail.Severity) > 0 {
-			vulns[i].Severity = detail.Severity
-		}
-		if len(detail.Aliases) > 0 {
-			vulns[i].Aliases = detail.Aliases
-		}
-		if len(detail.Affected) > 0 {
-			vulns[i].Affected = detail.Affected
-		}
-		if detail.DatabaseSpecific.Severity != "" {
-			vulns[i].DatabaseSpecific = detail.DatabaseSpecific
-		}
-		// OSV.dev never sends this, but a service speaking the OSV wire
-		// protocol does — and the detail endpoint is the only place it can
-		// arrive, since querybatch returns nothing but {id, modified}. Dropping
-		// it here would silently strip status and corroboration from every
-		// record in production while hand-built unit tests kept passing.
-		if detail.Intelligence != nil {
-			vulns[i].Intelligence = detail.Intelligence
-		}
-		// Annotations on the batch record describe this answer and win; the
-		// detail's are only a fallback for a batch that carried none.
-		if len(vulns[i].Provenance) == 0 {
-			vulns[i].Provenance = detail.Provenance
-		}
-		if len(vulns[i].SameAs) == 0 {
-			vulns[i].SameAs = detail.SameAs
-		}
-		if len(vulns[i].Disagreement) == 0 {
-			vulns[i].Disagreement = detail.Disagreement
-		}
-		if len(vulns[i].Symbols) == 0 {
-			vulns[i].Symbols = detail.Symbols
+		if detail, ok := details[vulns[i].ID]; ok {
+			vulns[i].ApplyDetail(detail)
 		}
 	}
 }
@@ -740,12 +756,16 @@ func fetchVulnDetail(ctx context.Context, client *http.Client, baseURL, id strin
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return vulnsource.Record{}, err
+		return vulnsource.Record{}, retryableError{err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return vulnsource.Record{}, fmt.Errorf("OSV vuln lookup for %s returned status %d", id, resp.StatusCode)
+		err := fmt.Errorf("OSV vuln lookup for %s returned status %d", id, resp.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
+			return vulnsource.Record{}, retryableError{err}
+		}
+		return vulnsource.Record{}, err
 	}
 
 	var v vulnsource.Record

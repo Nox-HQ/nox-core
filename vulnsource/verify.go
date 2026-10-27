@@ -167,12 +167,22 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 	if intelOut == nil {
 		intelOut = make(map[int][]Record)
 	}
-	refFailed := refErr != nil || v.refDeg.Len() > 0
+	// Reachability is judged on lookup failures only. A failed advisory-detail
+	// fetch (degrade.AdvisoryDetail) means a record kept a default severity, not
+	// that the source could not be reached or its IDs compared; it is reported
+	// separately, and only for the records this scan uses.
+	refLookupFailures := lookupFailures(v.refDeg)
+	refFailed := refErr != nil || len(refLookupFailures) > 0
 
 	// A partial answer is not a failed one. The source reached us and told us
 	// what it did not cover; that is forwarded as its own degradation, and
 	// must not be mistaken below for the source being unreachable.
 	unreachable := v.forwardIncomplete()
+
+	// Both sources hydrate the same advisory IDs, so a record one side could
+	// not hydrate is filled from the other when it can. Only what neither could
+	// hydrate is reported, and only for records the scan uses.
+	refGaps := v.fillAdvisoryDetail(intelOut, refOut)
 
 	// An intelligence source that reached the network and failed answered
 	// nothing, and nothing is not a suppression. The reference answers in its
@@ -195,7 +205,9 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 					v.reference.Name(), v.intel.Name()))
 		}
 		v.setResult(Verification{Checked: false})
-		return union(intelOut, refOut), nil
+		out, added := union(intelOut, refOut)
+		v.reportReferenceDetail(added, refGaps)
+		return out, nil
 	}
 
 	// The reference is the checker, not the answerer. It failing means the
@@ -204,8 +216,8 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 		detail := "reference source unavailable"
 		if refErr != nil {
 			detail = fmt.Sprintf("reference source failed: %v", refErr)
-		} else if items := v.refDeg.Items(); len(items) > 0 {
-			detail = fmt.Sprintf("reference source degraded: %s", items[0].Detail)
+		} else if len(refLookupFailures) > 0 {
+			detail = fmt.Sprintf("reference source degraded: %s", refLookupFailures[0].Detail)
 		}
 		v.deg.Add(degrade.IntelUnverified, detail,
 			fmt.Sprintf("the %s source answered but was not checked against a reference; "+
@@ -224,6 +236,7 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 		synced = mr.MirrorSyncedAt()
 	}
 
+	var restored []recordKey
 	result := Verification{Checked: true}
 	for i, q := range qs {
 		have := idSet(intelOut[i])
@@ -236,6 +249,7 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 				// The source said this answer was partial. Restoring what it
 				// did not return is right; calling that withholding is not.
 				intelOut[i] = append(intelOut[i], ref)
+				restored = append(restored, recordKey{i, ref.ID})
 				continue
 			}
 			if postdatesSync(ref, synced[i]) {
@@ -245,6 +259,7 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 					Query: q, VulnID: ref.ID, Status: StatusPublished,
 				})
 				intelOut[i] = append(intelOut[i], ref)
+				restored = append(restored, recordKey{i, ref.ID})
 				continue
 			}
 			result.Suppressed = append(result.Suppressed, Discrepancy{
@@ -252,6 +267,7 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 			})
 			// Return it anyway: a discrepancy costs trust, not coverage.
 			intelOut[i] = append(intelOut[i], ref)
+			restored = append(restored, recordKey{i, ref.ID})
 		}
 
 		refHave := idSet(refOut[i])
@@ -279,8 +295,79 @@ func (v *VerifyingSource) Lookup(ctx context.Context, qs []Query) (map[int][]Rec
 				"but the source cannot be trusted to report completely")
 	}
 
+	v.reportReferenceKeys(restored, refGaps)
 	v.setResult(result)
 	return intelOut, nil
+}
+
+// fillAdvisoryDetail fills each side's unhydrated records from the other (see
+// fillDetail), reports the intelligence source's records that stayed
+// unhydrated — every one of them is used by the scan — and returns the
+// reference gaps that remain, for reporting once it is known which reference
+// records the scan uses.
+func (v *VerifyingSource) fillAdvisoryDetail(intelOut, refOut map[int][]Record) map[recordKey]struct{} {
+	intelFailed := detailFailures(v.intel)
+	refFailed := detailFailures(v.reference)
+	intelGaps := detailGaps(intelOut, intelFailed)
+	refGaps := detailGaps(refOut, refFailed)
+
+	intelLeft := fillDetail(intelOut, refOut, intelGaps, refGaps)
+	refLeft := fillDetail(refOut, intelOut, refGaps, intelGaps)
+
+	if v.intelNamesFailures() {
+		ids := keyIDs(intelLeft)
+		ReportAdvisoryDetail(v.deg, v.intel.Name(), len(ids), ids)
+	}
+	return refLeft
+}
+
+// intelNamesFailures reports whether the intelligence source says which IDs it
+// failed to hydrate. One that cannot has its AdvisoryDetail degradation
+// forwarded unchanged instead: all its records are used, and none can be filled.
+func (v *VerifyingSource) intelNamesFailures() bool {
+	_, ok := v.intel.(DetailFailureReporter)
+	return ok
+}
+
+func (v *VerifyingSource) reportReferenceKeys(used []recordKey, gaps map[recordKey]struct{}) {
+	var ids []string
+	for _, k := range used {
+		if _, bad := gaps[k]; bad {
+			ids = append(ids, k.id)
+		}
+	}
+	ReportAdvisoryDetail(v.deg, v.reference.Name(), len(ids), ids)
+}
+
+// reportReferenceDetail is reportReferenceKeys for records the union added.
+func (v *VerifyingSource) reportReferenceDetail(used []usedRecord, gaps map[recordKey]struct{}) {
+	keys := make([]recordKey, len(used))
+	for i, u := range used {
+		keys[i] = recordKey{u.query, u.rec.ID}
+	}
+	v.reportReferenceKeys(keys, gaps)
+}
+
+// detailFailures returns the IDs src failed to hydrate in its latest lookup, or
+// nil when it cannot say.
+func detailFailures(src Source) map[string]struct{} {
+	if r, ok := src.(DetailFailureReporter); ok {
+		return r.DetailFailures()
+	}
+	return nil
+}
+
+// lookupFailures returns d's degradations that mean the source failed to
+// answer, leaving out advisory-detail failures, which mean it answered with
+// records that kept a default severity.
+func lookupFailures(d *degrade.Degradations) []degrade.Degradation {
+	var out []degrade.Degradation
+	for _, item := range d.Items() {
+		if item.Kind != degrade.AdvisoryDetail {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // postdatesSync reports whether the reference record was changed strictly after
@@ -304,11 +391,16 @@ func postdatesSync(ref Record, syncedAt time.Time) bool {
 }
 
 // forwardIncomplete copies the intelligence source's IntelIncomplete
-// degradations to the scan and returns the rest, which are failures to answer.
+// and AdvisoryDetail degradations to the scan and returns the rest, which are
+// failures to answer. An intelligence source that names its failed IDs is
+// reported per record by fillAdvisoryDetail; one that cannot is forwarded as is.
 func (v *VerifyingSource) forwardIncomplete() []degrade.Degradation {
 	var rest []degrade.Degradation
 	for _, d := range v.intelDeg.Items() {
-		if d.Kind == degrade.IntelIncomplete {
+		if d.Kind == degrade.AdvisoryDetail && v.intelNamesFailures() {
+			continue // reported per record by fillAdvisoryDetail
+		}
+		if d.Kind == degrade.IntelIncomplete || d.Kind == degrade.AdvisoryDetail {
 			v.deg.Add(d.Kind, d.Detail, d.Impact)
 			continue
 		}
@@ -323,19 +415,26 @@ func (v *VerifyingSource) setResult(r Verification) {
 	v.result = r
 }
 
+// usedRecord is a record and the query whose answer it joined.
+type usedRecord struct {
+	query int
+	rec   Record
+}
+
 // union merges the reference's records into the intelligence source's answer
 // without classifying the difference — used when the difference means nothing
-// because one side never answered.
-func union(intelOut, refOut map[int][]Record) map[int][]Record {
+// because one side never answered. It also returns the records it added.
+func union(intelOut, refOut map[int][]Record) (merged map[int][]Record, added []usedRecord) {
 	for i, refs := range refOut {
 		have := idSet(intelOut[i])
 		for _, r := range refs {
 			if _, ok := have[r.ID]; !ok {
 				intelOut[i] = append(intelOut[i], r)
+				added = append(added, usedRecord{i, r})
 			}
 		}
 	}
-	return intelOut
+	return intelOut, added
 }
 
 func idSet(recs []Record) map[string]struct{} {
