@@ -139,40 +139,69 @@ func splitVersion(v string) (nums []int, prerelease string) {
 // ecosystem name must map it first; this package deliberately does not know
 // that mapping, which belongs to whichever wire protocol produced the record.
 func (r *Record) AffectedIntervals(pkgName, wireEcosystem string) []Interval {
-	want := strings.ToLower(pkgName)
 	var out []Interval
-
 	for _, aff := range r.Affected {
-		if !strings.EqualFold(aff.Package.Name, want) {
-			continue
+		if names(aff, pkgName, wireEcosystem) {
+			out = append(out, entryIntervals(aff)...)
 		}
-		if aff.Package.Ecosystem != "" && wireEcosystem != "" &&
-			!strings.EqualFold(aff.Package.Ecosystem, wireEcosystem) {
-			continue
-		}
-		for _, rng := range aff.Ranges {
-			cur := Interval{}
-			open := false
-			for _, e := range rng.Events {
-				switch {
-				case e.Introduced != "":
-					if open {
-						out = append(out, cur)
-					}
-					cur, open = Interval{Introduced: e.Introduced}, true
-				case e.Fixed != "":
-					cur.Fixed = e.Fixed
+	}
+	return out
+}
+
+// names reports whether the affected entry is about pkgName in wireEcosystem.
+func names(aff Affected, pkgName, wireEcosystem string) bool {
+	if !strings.EqualFold(aff.Package.Name, pkgName) {
+		return false
+	}
+	return aff.Package.Ecosystem == "" || wireEcosystem == "" ||
+		strings.EqualFold(aff.Package.Ecosystem, wireEcosystem)
+}
+
+// entryIntervals flattens one affected entry's ranges into intervals.
+func entryIntervals(aff Affected) []Interval {
+	var out []Interval
+	for _, rng := range aff.Ranges {
+		cur := Interval{}
+		open := false
+		for _, e := range rng.Events {
+			switch {
+			case e.Introduced != "":
+				if open {
 					out = append(out, cur)
-					cur, open = Interval{}, false
-				case e.LastAffected != "":
-					cur.LastAffected = e.LastAffected
-					out = append(out, cur)
-					cur, open = Interval{}, false
 				}
-			}
-			if open {
+				cur, open = Interval{Introduced: e.Introduced}, true
+			case e.Fixed != "":
+				cur.Fixed = e.Fixed
 				out = append(out, cur)
+				cur, open = Interval{}, false
+			case e.LastAffected != "":
+				cur.LastAffected = e.LastAffected
+				out = append(out, cur)
+				cur, open = Interval{}, false
 			}
+		}
+		if open {
+			out = append(out, cur)
+		}
+	}
+	return out
+}
+
+// ecoInterval is an interval with the ecosystem its bounds are ordered in.
+type ecoInterval struct {
+	Interval
+	eco string
+}
+
+// ecoIntervals is AffectedIntervals keeping each interval's ecosystem.
+func (r *Record) ecoIntervals(pkgName, wireEcosystem string) []ecoInterval {
+	var out []ecoInterval
+	for _, aff := range r.Affected {
+		if !names(aff, pkgName, wireEcosystem) {
+			continue
+		}
+		for _, iv := range entryIntervals(aff) {
+			out = append(out, ecoInterval{iv, eco(aff, wireEcosystem)})
 		}
 	}
 	return out
@@ -192,8 +221,8 @@ func (r *Record) Affects(pkgName, wireEcosystem, version string) bool {
 	if r.Retracted() {
 		return false
 	}
-	for _, iv := range r.AffectedIntervals(pkgName, wireEcosystem) {
-		if iv.Covers(version) {
+	for _, iv := range r.ecoIntervals(pkgName, wireEcosystem) {
+		if iv.coversIn(iv.eco, version) {
 			return true
 		}
 	}
@@ -216,7 +245,7 @@ func (r *Record) Affects(pkgName, wireEcosystem, version string) bool {
 // be ordered. That is a genuine "we do not know", and any answer invented to
 // fill it would reintroduce the defect in a new form.
 func (r *Record) FixedVersion(pkgName, wireEcosystem, installed string) string {
-	intervals := r.AffectedIntervals(pkgName, wireEcosystem)
+	intervals := r.ecoIntervals(pkgName, wireEcosystem)
 
 	// A single interval leaves nothing to select between, and its bounds are
 	// the ones the source already matched the installed version against.
@@ -226,12 +255,12 @@ func (r *Record) FixedVersion(pkgName, wireEcosystem, installed string) string {
 
 	best := ""
 	for _, iv := range intervals {
-		if iv.Fixed == "" || !iv.Covers(installed) {
+		if iv.Fixed == "" || !iv.coversIn(iv.eco, installed) {
 			continue
 		}
 		// Overlapping intervals are malformed data, but if they occur the
 		// smallest upgrade that clears the advisory is the honest answer.
-		if best == "" || CompareVersions(iv.Fixed, best) < 0 {
+		if best == "" || compareIn(iv.eco, iv.Fixed, best) < 0 {
 			best = iv.Fixed
 		}
 	}
@@ -293,11 +322,7 @@ func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 	}
 	undecidable := false
 	for _, aff := range r.Affected {
-		if !strings.EqualFold(aff.Package.Name, pkgName) {
-			continue
-		}
-		if aff.Package.Ecosystem != "" && wireEcosystem != "" &&
-			!strings.EqualFold(aff.Package.Ecosystem, wireEcosystem) {
+		if !names(aff, pkgName, wireEcosystem) {
 			continue
 		}
 		listed := matchList(aff.Versions, eco(aff, wireEcosystem), version)
@@ -311,6 +336,12 @@ func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 				ordered.Affected[0].Ranges = append(ordered.Affected[0].Ranges, rg)
 				sawOrdered = true
 			}
+		}
+		if sawOrdered && !rangesOrderedIn(eco(aff, wireEcosystem), version, ordered.Affected[0].Ranges) {
+			// A bound or the version itself cannot be ordered in this
+			// ecosystem; reading it anyway is a guess in either direction.
+			sawOrdered = false
+			undecidable = true
 		}
 		if sawOrdered && ordered.Affects(pkgName, wireEcosystem, version) {
 			return VerdictAffected
@@ -339,6 +370,25 @@ func (r *Record) Decide(pkgName, wireEcosystem, version string) Verdict {
 		return VerdictUndecidable
 	}
 	return VerdictNotAffected
+}
+
+// rangesOrderedIn reports whether version and every bound of ranges can be
+// ordered in the ecosystem (see orderedIn). Introduced "0" is OSV's "since the
+// beginning", not a version.
+func rangesOrderedIn(ecosystem, version string, ranges []Range) bool {
+	if !orderedIn(ecosystem, version) {
+		return false
+	}
+	for _, rg := range ranges {
+		for _, e := range rg.Events {
+			for _, b := range []string{e.Introduced, e.Fixed, e.LastAffected} {
+				if b != "" && b != "0" && !orderedIn(ecosystem, b) {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // listMatch is how an explicit versions list relates to a queried version.
