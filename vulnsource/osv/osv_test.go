@@ -338,6 +338,7 @@ func TestEcosystem_ParsedEcosystemsAllMap(t *testing.T) {
 		"go": "Go", "npm": "npm", "pypi": "PyPI", "rubygems": "RubyGems",
 		"cargo": "crates.io", "maven": "Maven", "gradle": "Maven", "nuget": "NuGet",
 		"composer": "Packagist", "packagist": "Packagist", "pub": "Pub", "hex": "Hex",
+		"swift": "SwiftURL",
 	}
 	for in, exp := range want {
 		got, ok := Ecosystem(in)
@@ -347,5 +348,13 @@ func TestEcosystem_ParsedEcosystemsAllMap(t *testing.T) {
 	}
 	if _, ok := Ecosystem("docker"); ok {
 		t.Errorf("Ecosystem(docker) must stay unmapped: OSV rejects the whole batch on an unknown ecosystem")
+	}
+	// OSV has no CocoaPods ecosystem, and its ConanCenter answers nothing even
+	// for zlib 1.2.11; mapping either would turn "not checked" into a clean
+	// answer.
+	for _, eco := range []string{"cocoapods", "conan"} {
+		if _, ok := Ecosystem(eco); ok {
+			t.Errorf("Ecosystem(%s) must stay unmapped", eco)
+		}
 	}
 }

@@ -830,6 +830,14 @@ func Ecosystem(eco string) (string, bool) {
 		return "Pub", true
 	case "hex":
 		return "Hex", true
+	// SwiftPM packages are named by repository URL, without scheme or
+	// ".git" ("github.com/vapor/vapor"); the parser normalises
+	// Package.resolved locations to that form. OSV has no CocoaPods
+	// ecosystem, and its ConanCenter answers nothing even for zlib 1.2.11,
+	// so cocoapods and conan stay unmapped: their packages are reported as
+	// not checked rather than checked and clean.
+	case "swift":
+		return "SwiftURL", true
 	default:
 		return "", false
 	}
