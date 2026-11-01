@@ -128,6 +128,27 @@ func TestDecideRealHackneyRecords(t *testing.T) {
 	}
 }
 
+// GHSA-gcj9-jj38-hwmc as api.osv.dev serves it: SwiftURL names a package by its
+// repository URL without scheme or ".git", with one SEMVER range. vapor 4.40.0
+// is affected and 4.40.1 is the fix.
+func TestDecideRealSwiftURLRecord(t *testing.T) {
+	b, err := os.ReadFile("testdata/GHSA-gcj9-jj38-hwmc.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r Record
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	const pkg = "github.com/vapor/vapor"
+	if got := r.Decide(pkg, "SwiftURL", "4.40.0"); got != VerdictAffected {
+		t.Errorf("vapor 4.40.0 = %v, want affected", got)
+	}
+	if got := r.Decide(pkg, "SwiftURL", "4.40.1"); got != VerdictNotAffected {
+		t.Errorf("vapor 4.40.1 (the fixed version) = %v, want not affected", got)
+	}
+}
+
 func listed(eco string, vers ...string) Record {
 	return Record{ID: "X", Affected: []Affected{{
 		Package:  Package{Name: "pkg", Ecosystem: eco},
