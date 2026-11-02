@@ -240,3 +240,60 @@ func TestSource_CachesDespiteDivergentTimestampPrecision(t *testing.T) {
 			"every scan because it is stored under a validator no lookup uses", d)
 	}
 }
+
+// A cache hit used to replace the batch record with the cached copy and keep
+// only provenance, same-as and disagreement from the answer, so nox_priority
+// (and affected symbols derived after the copy was cached) never reached a
+// finding once an advisory was cached: after the first scan, for nearly
+// everything. Found end to end against the service; the analyzer's unit tests
+// fed records in directly and could not see it.
+func TestSource_CacheHitKeepsThisAnswersPriorityAndNewSymbols(t *testing.T) {
+	run := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/querybatch" {
+			rec := vulnsource.Record{ID: "GHSA-9", Modified: "2026-01-01T00:00:00Z"}
+			switch run {
+			case 0:
+				rec.Priority = &vulnsource.Priority{Score: 1.1, Rule: "r/v1"}
+			case 1:
+				rec.Priority = &vulnsource.Priority{Score: 1.9, Rule: "r/v1"}
+				rec.Symbols = []vulnsource.AffectedSymbols{{Package: "lodash", Method: vulnsource.SymbolMethodPatchDiff, Status: vulnsource.SymbolStatusOK}}
+			case 2:
+				// A plain OSV answer: no priority, no symbols.
+			}
+			encodeJSON(t, w, BatchResponse{Results: []BatchResult{{Vulns: []vulnsource.Record{rec}}}})
+			return
+		}
+		d := advisory("GHSA-9", "2026-01-01T00:00:00Z", "detailed")
+		d.Priority = &vulnsource.Priority{Score: 1.1, Rule: "r/v1"}
+		encodeJSON(t, w, d)
+	}))
+	defer srv.Close()
+	src := New(srv.URL, srv.Client(), nil).WithCache(NewFileCache(t.TempDir()))
+	qs := []vulnsource.Query{{Ecosystem: "npm", Name: "lodash", Version: "4.17.15"}}
+
+	var got [3]vulnsource.Record
+	for run = 0; run < 3; run++ {
+		res, err := src.Lookup(context.Background(), qs)
+		if err != nil || len(res[0]) != 1 {
+			t.Fatalf("run %d: %v %+v", run, err, res)
+		}
+		got[run] = res[0][0]
+	}
+	if p := got[1].Priority; p == nil || p.Score != 1.9 {
+		t.Errorf("cache hit: priority %+v, want this answer's 1.9", p)
+	}
+	if len(got[1].Symbols) != 1 {
+		t.Errorf("cache hit: symbols the answer carried were dropped: %+v", got[1].Symbols)
+	}
+	if got[2].Priority != nil {
+		t.Errorf("an answer without a priority inherited a cached one: %+v", got[2].Priority)
+	}
+	if len(got[2].Symbols) != 0 {
+		// The cached copy has none here; the point is only that nothing is invented.
+		t.Errorf("symbols appeared from nowhere: %+v", got[2].Symbols)
+	}
+	if got[1].Summary != "detailed" {
+		t.Errorf("cache hit lost the cached content: %+v", got[1])
+	}
+}
