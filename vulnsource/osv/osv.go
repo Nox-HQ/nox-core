@@ -654,8 +654,18 @@ func needed(cache AdvisoryCache, result map[int][]vulnsource.Record) (ids []stri
 			if cache != nil {
 				if rec, ok := cache.Get(id, vs[i].Modified); ok {
 					// The batch answer's annotations describe THIS answer;
-					// the cached copy's describe an earlier one.
+					// the cached copy's describe an earlier one. The
+					// priority is one of them: EPSS moves daily while the
+					// advisory, and so its cache key, does not, so a cached
+					// priority is stale and an answer without one (OSV.dev)
+					// must not inherit it. Affected symbols the service has
+					// derived since the copy was cached arrive on the batch
+					// and win; without them the cached ones stand.
 					rec.Provenance, rec.SameAs, rec.Disagreement = vs[i].Provenance, vs[i].SameAs, vs[i].Disagreement
+					rec.Priority = vs[i].Priority
+					if len(vs[i].Symbols) > 0 {
+						rec.Symbols = vs[i].Symbols
+					}
 					vs[i] = rec
 					continue
 				}
