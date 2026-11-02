@@ -124,7 +124,7 @@ func TestApplyVulnDetails_CopiesEveryField(t *testing.T) {
 		Aliases:          []string{"CVE-2024-0001"},
 		Details:          "long form",
 		Affected:         []vulnsource.Affected{{Package: vulnsource.Package{Name: "p", Ecosystem: "npm"}}},
-		DatabaseSpecific: vulnsource.DatabaseSpecific{Severity: "CRITICAL"},
+		DatabaseSpecific: vulnsource.DatabaseSpecific{Severity: "CRITICAL", CWEIDs: []string{"CWE-79"}},
 		Intelligence: &vulnsource.Intelligence{
 			Status:        vulnsource.StatusCandidate,
 			Corroboration: 3,
@@ -134,6 +134,7 @@ func TestApplyVulnDetails_CopiesEveryField(t *testing.T) {
 		SameAs:       []string{"CVE-2024-0001"},
 		Disagreement: []string{"modified_mirror_older"},
 		Symbols:      []vulnsource.AffectedSymbols{{Package: "p", Method: vulnsource.SymbolMethodPatchDiff, Status: vulnsource.SymbolStatusOK}},
+		Priority:     &vulnsource.Priority{Score: 1.4, Band: "epss", Rule: "epss-first-severity-cwe/v1"},
 	}
 
 	// Guard the guard: every field of vulnsource.Record must be set in the fixture, or

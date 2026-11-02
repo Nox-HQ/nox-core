@@ -115,6 +115,33 @@ type Record struct {
 	// OSV.dev response. See AffectedSymbols for what it may and may not be used
 	// to conclude.
 	Symbols []AffectedSymbols `json:"nox_symbols,omitempty"`
+
+	// Priority is how likely the advisory is to be weaponised (nox_priority),
+	// by a named, versioned rule. It orders; it is never evidence and never a
+	// reason to hide a finding, and it is about the advisory, not whether an
+	// application reaches it. Absent from a plain OSV.dev response.
+	Priority *Priority `json:"nox_priority,omitempty"`
+}
+
+// Priority is NOX Intelligence's ranking of an advisory. Every field a
+// consumer needs to record it and re-derive it later is here: the rule, the
+// band that decided, and the inputs.
+type Priority struct {
+	// Score orders advisories under one Rule; scores from different rules are
+	// not comparable.
+	Score float64 `json:"score"`
+	// Band is the part of the rule that decided ("epss" or "rule" under
+	// epss-first-severity-cwe/v1).
+	Band string `json:"band"`
+	Rule string `json:"rule"`
+	// Why is one line a person can read.
+	Why            string   `json:"why"`
+	EPSS           *float64 `json:"epss,omitempty"`
+	EPSSPercentile *float64 `json:"epss_percentile,omitempty"`
+	Severity       string   `json:"severity,omitempty"`
+	CWE            string   `json:"cwe,omitempty"`
+	SeverityRate   float64  `json:"severity_rate"`
+	CWERate        float64  `json:"cwe_rate"`
 }
 
 // Provenance is one retrieval of an advisory: the upstream database, the path

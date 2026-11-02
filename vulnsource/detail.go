@@ -126,6 +126,9 @@ func (r *Record) ApplyDetail(detail Record) {
 	if len(r.Symbols) == 0 {
 		r.Symbols = detail.Symbols
 	}
+	if r.Priority == nil {
+		r.Priority = detail.Priority
+	}
 }
 
 // recordKey names one record of one query's answer.
