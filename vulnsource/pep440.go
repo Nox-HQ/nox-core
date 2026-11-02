@@ -160,6 +160,9 @@ func orderedIn(ecosystem, version string) bool {
 	if !ComparableVersion(version) {
 		return false
 	}
+	if isMaven(ecosystem) { // every Maven version parses; a lettered one included
+		return true
+	}
 	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	v, _, _ = strings.Cut(v, "+")
 	core, _, _ := strings.Cut(v, "-")
@@ -167,25 +170,35 @@ func orderedIn(ecosystem, version string) bool {
 }
 
 // compareIn orders a and b in the ecosystem: PEP 440 for PyPI when both parse,
-// the generic comparator otherwise.
+// Maven's rule for Maven, the generic comparator otherwise.
 func compareIn(ecosystem, a, b string) int {
-	if isPyPI(ecosystem) {
-		if c, ok := comparePEP440(a, b); ok {
-			return c
-		}
+	if c, ok := ecosystemCompare(ecosystem, a, b); ok {
+		return c
 	}
 	return CompareVersions(a, b)
 }
 
+// ecosystemCompare orders a and b by the ecosystem's own rule, reporting false
+// when the ecosystem has none here or either version cannot be read by it.
+func ecosystemCompare(ecosystem, a, b string) (int, bool) {
+	switch {
+	case isPyPI(ecosystem):
+		return comparePEP440(a, b)
+	case isMaven(ecosystem):
+		if !ComparableVersion(a) || !ComparableVersion(b) {
+			return 0, false
+		}
+		return compareMaven(a, b), true
+	}
+	return 0, false
+}
+
 // coversIn is Interval.Covers with the ecosystem's ordering.
 func (iv Interval) coversIn(ecosystem, installed string) bool {
-	if !isPyPI(ecosystem) {
+	if _, ok := ecosystemCompare(ecosystem, installed, installed); !ok {
 		return iv.Covers(installed)
 	}
-	if _, ok := parsePEP440(installed); !ok {
-		return iv.Covers(installed)
-	}
-	bound := func(b string) (int, bool) { return comparePEP440(installed, b) }
+	bound := func(b string) (int, bool) { return ecosystemCompare(ecosystem, installed, b) }
 	if iv.Introduced != "" && iv.Introduced != "0" {
 		if c, ok := bound(iv.Introduced); !ok || c < 0 {
 			return false
