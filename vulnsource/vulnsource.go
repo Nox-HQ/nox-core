@@ -145,6 +145,11 @@ func (r *Record) Theoretical() bool { return r.Intelligence.Theoretical() }
 // DatabaseSpecific holds the subset of source-specific annotations nox reads.
 type DatabaseSpecific struct {
 	Severity string `json:"severity"`
+	// CWEIDs are the weakness classes the publisher assigned (GitHub's
+	// advisories carry them). Not omitempty, so a re-marshalled record keeps
+	// the difference: nil (null) means the source did not say, an empty list
+	// means it said none.
+	CWEIDs []string `json:"cwe_ids"`
 }
 
 // Severity holds a CVSS or other severity score.

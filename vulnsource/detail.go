@@ -93,7 +93,10 @@ func (r *Record) ApplyContent(detail Record) {
 		r.Affected = detail.Affected
 	}
 	if detail.DatabaseSpecific.Severity != "" {
-		r.DatabaseSpecific = detail.DatabaseSpecific
+		r.DatabaseSpecific.Severity = detail.DatabaseSpecific.Severity
+	}
+	if detail.DatabaseSpecific.CWEIDs != nil {
+		r.DatabaseSpecific.CWEIDs = detail.DatabaseSpecific.CWEIDs
 	}
 }
 
