@@ -4,18 +4,22 @@ import "testing"
 
 // A distribution package carries its release in nox's ecosystem name, and OSV
 // names the ecosystem with it: Alpine branches as "v3.22", Debian by number.
-// Ubuntu's OSV names differ by support stream, so it stays unmapped (reported
-// as not checked) rather than guessed.
+// Ubuntu is named with its standard-archive stream ("24.04:LTS", or a
+// release alone when it is not LTS), which the image's os-release states.
 func TestDistroEcosystems(t *testing.T) {
 	for in, want := range map[string]string{
-		"alpine:v3.22": "Alpine:v3.22",
-		"debian:12":    "Debian:12",
+		"alpine:v3.22":     "Alpine:v3.22",
+		"debian:12":        "Debian:12",
+		"ubuntu:24.04:LTS": "Ubuntu:24.04:LTS",
+		"ubuntu:25.10":     "Ubuntu:25.10",
 	} {
 		if got, ok := Ecosystem(in); !ok || got != want {
 			t.Errorf("Ecosystem(%q) = %q, %v; want %q", in, got, ok, want)
 		}
 	}
-	for _, in := range []string{"alpine", "alpine:", "debian:", "ubuntu:24.04"} {
+	// A Pro or FIPS stream needs a subscription an image does not carry;
+	// answering for it would describe packages the image does not have.
+	for _, in := range []string{"alpine", "alpine:", "debian:", "ubuntu:", "ubuntu:Pro:24.04:LTS", "ubuntu:Pro:FIPS:22.04:LTS"} {
 		if got, ok := Ecosystem(in); ok {
 			t.Errorf("Ecosystem(%q) = %q; want unmapped", in, got)
 		}
