@@ -189,6 +189,10 @@ func ecosystemCompare(ecosystem, a, b string) (int, bool) {
 			return 0, false
 		}
 		return compareMaven(a, b), true
+	case isAlpine(ecosystem):
+		return compareAPK(a, b)
+	case isDebian(ecosystem):
+		return compareDpkg(a, b)
 	}
 	return 0, false
 }
