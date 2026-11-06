@@ -848,9 +848,20 @@ func Ecosystem(eco string) (string, bool) {
 	// not checked rather than checked and clean.
 	case "swift":
 		return "SwiftURL", true
-	default:
-		return "", false
 	}
+	// A distribution package names its release, as OSV's ecosystem does:
+	// "alpine:v3.22" is OSV's "Alpine:v3.22", "debian:12" its "Debian:12".
+	// Ubuntu is left out: OSV splits it by support stream ("Ubuntu:22.04:LTS",
+	// "Ubuntu:Pro:…"), and a guessed stream would answer for the wrong one.
+	if name, release, ok := strings.Cut(eco, ":"); ok && release != "" {
+		switch name {
+		case "alpine":
+			return "Alpine:" + release, true
+		case "debian":
+			return "Debian:" + release, true
+		}
+	}
+	return "", false
 }
 
 // EcosystemName maps nox's internal ecosystem names to the ecosystem strings
