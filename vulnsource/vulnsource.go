@@ -210,6 +210,11 @@ type Affected struct {
 // silently inflates the severity of one that should have been demoted.
 type EcosystemSpecific struct {
 	Imports []Import `json:"imports"`
+	// Urgency is a distribution's own rating of the advisory for its
+	// release: Debian's security tracker publishes unimportant, low,
+	// medium, high, "not yet assigned" and end-of-life here. Empty when the
+	// publisher gives none.
+	Urgency string `json:"urgency,omitempty"`
 }
 
 // Import is a single affected import path within a module.
