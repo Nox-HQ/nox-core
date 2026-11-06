@@ -2,6 +2,8 @@ package osv
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -295,5 +297,25 @@ func TestSource_CacheHitKeepsThisAnswersPriorityAndNewSymbols(t *testing.T) {
 	}
 	if got[1].Summary != "detailed" {
 		t.Errorf("cache hit lost the cached content: %+v", got[1])
+	}
+}
+
+// An entry written by an older nox was encoded from a Record with fewer fields
+// (no Debian urgency before schema 2). Served as a hit, it would drop those
+// fields until the advisory next changed upstream, which can be never. The
+// cache key carries the record schema, so such an entry is a miss.
+func TestFileCache_OlderSchemaEntryIsAMiss(t *testing.T) {
+	dir := t.TempDir()
+	const id, mod = "DEBIAN-CVE-2016-2781", "2026-09-22T07:01:56Z"
+	old := sha256.Sum256([]byte(id + "\x00" + mod)) // the schema-1 key
+	body, err := json.Marshal(entry{ID: id, Validator: mod, Record: advisory(id, mod, "written by nox 1.60")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hex.EncodeToString(old[:])+".json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := NewFileCache(dir).Get(id, mod); ok {
+		t.Errorf("an entry from an older record schema was served: %+v", got)
 	}
 }

@@ -244,3 +244,16 @@ func sgn(n int) int {
 	}
 	return 0
 }
+
+// DistroUrgency is the distribution's own rating of r for pkgName in the
+// named ecosystem ("Debian:12"), or "" when the entry gives none. Only the
+// entry naming that package and release answers: the same CVE can be
+// unimportant in one release and high in another.
+func (r *Record) DistroUrgency(pkgName, wireEcosystem string) string {
+	for _, a := range r.Affected {
+		if a.Package.Name == pkgName && strings.EqualFold(a.Package.Ecosystem, wireEcosystem) {
+			return a.EcosystemSpecific.Urgency
+		}
+	}
+	return ""
+}

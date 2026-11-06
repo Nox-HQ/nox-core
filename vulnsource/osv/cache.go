@@ -64,6 +64,9 @@ type entry struct {
 // stopped depending on years ago.
 const pruneAfter = 90 * 24 * time.Hour
 
+// recordSchema versions the cached Record encoding (see key).
+const recordSchema = "2"
+
 // DefaultCacheDir returns the default advisory cache directory
 // (~/.nox/cache/advisories/).
 func DefaultCacheDir() string {
@@ -99,8 +102,13 @@ func NewFileCache(dir string) *FileCache {
 // are hashed together so a changed advisory cannot collide with its own older
 // copy, and so an id containing path separators cannot escape the cache
 // directory.
+//
+// recordSchema joins them because an entry is a re-encoded Record: one written
+// by code whose Record lacked a field (Debian urgency, before 2) would serve
+// without it until the advisory next changed upstream. Bump it whenever Record
+// gains a field decoded from the advisory; every entry is fetched once more.
 func key(id, validator string) string {
-	sum := sha256.Sum256([]byte(id + "\x00" + validator))
+	sum := sha256.Sum256([]byte(id + "\x00" + validator + "\x00" + recordSchema))
 	return hex.EncodeToString(sum[:])
 }
 
