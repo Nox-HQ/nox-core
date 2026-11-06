@@ -851,14 +851,21 @@ func Ecosystem(eco string) (string, bool) {
 	}
 	// A distribution package names its release, as OSV's ecosystem does:
 	// "alpine:v3.22" is OSV's "Alpine:v3.22", "debian:12" its "Debian:12".
-	// Ubuntu is left out: OSV splits it by support stream ("Ubuntu:22.04:LTS",
-	// "Ubuntu:Pro:…"), and a guessed stream would answer for the wrong one.
+	// Ubuntu names its standard-archive stream, read from the image's
+	// os-release: "ubuntu:24.04:LTS" or, for a non-LTS release,
+	// "ubuntu:25.10". The Pro and FIPS streams need a subscription an image
+	// does not carry, so they are never named.
 	if name, release, ok := strings.Cut(eco, ":"); ok && release != "" {
 		switch name {
 		case "alpine":
 			return "Alpine:" + release, true
 		case "debian":
 			return "Debian:" + release, true
+		case "ubuntu":
+			if strings.HasPrefix(release, "Pro:") {
+				return "", false
+			}
+			return "Ubuntu:" + release, true
 		}
 	}
 	return "", false

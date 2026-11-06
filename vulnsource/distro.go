@@ -12,6 +12,7 @@ import (
 
 func isAlpine(ecosystem string) bool { return hasEcosystemPrefix(ecosystem, "Alpine") }
 func isDebian(ecosystem string) bool { return hasEcosystemPrefix(ecosystem, "Debian") }
+func isUbuntu(ecosystem string) bool { return hasEcosystemPrefix(ecosystem, "Ubuntu") }
 
 // hasEcosystemPrefix matches "Alpine" and "Alpine:v3.22" alike.
 func hasEcosystemPrefix(ecosystem, name string) bool {
@@ -248,12 +249,24 @@ func sgn(n int) int {
 // DistroUrgency is the distribution's own rating of r for pkgName in the
 // named ecosystem ("Debian:12"), or "" when the entry gives none. Only the
 // entry naming that package and release answers: the same CVE can be
-// unimportant in one release and high in another.
+// unimportant in one release and high in another. Debian rates in the
+// entry's ecosystem_specific.urgency; Ubuntu rates the record with a
+// severity of type "Ubuntu" (negligible .. critical), which answers only for
+// an Ubuntu entry.
 func (r *Record) DistroUrgency(pkgName, wireEcosystem string) string {
 	for _, a := range r.Affected {
-		if a.Package.Name == pkgName && strings.EqualFold(a.Package.Ecosystem, wireEcosystem) {
+		if a.Package.Name != pkgName || !strings.EqualFold(a.Package.Ecosystem, wireEcosystem) {
+			continue
+		}
+		if a.EcosystemSpecific.Urgency != "" || !isUbuntu(wireEcosystem) {
 			return a.EcosystemSpecific.Urgency
 		}
+		for _, s := range r.Severity {
+			if s.Type == "Ubuntu" {
+				return s.Score
+			}
+		}
+		return ""
 	}
 	return ""
 }
