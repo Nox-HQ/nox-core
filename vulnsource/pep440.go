@@ -193,6 +193,8 @@ func ecosystemCompare(ecosystem, a, b string) (int, bool) {
 		return compareAPK(a, b)
 	case isDebian(ecosystem), isUbuntu(ecosystem):
 		return compareDpkg(a, b)
+	case isRPM(ecosystem):
+		return compareRPM(a, b)
 	}
 	return 0, false
 }

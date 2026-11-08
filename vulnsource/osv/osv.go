@@ -854,13 +854,21 @@ func Ecosystem(eco string) (string, bool) {
 	// Ubuntu names its standard-archive stream, read from the image's
 	// os-release: "ubuntu:24.04:LTS" or, for a non-LTS release,
 	// "ubuntu:25.10". The Pro and FIPS streams need a subscription an image
-	// does not carry, so they are never named.
+	// does not carry, so they are never named. AlmaLinux and Rocky Linux name
+	// a major release ("almalinux:9"). Red Hat is left out: it publishes per
+	// product repository (enterprise_linux:9::baseos, ::appstream, EUS), and
+	// an image's rpm database does not record the repository a package came
+	// from.
 	if name, release, ok := strings.Cut(eco, ":"); ok && release != "" {
 		switch name {
 		case "alpine":
 			return "Alpine:" + release, true
 		case "debian":
 			return "Debian:" + release, true
+		case "almalinux":
+			return "AlmaLinux:" + release, true
+		case "rocky":
+			return "Rocky Linux:" + release, true
 		case "ubuntu":
 			if strings.HasPrefix(release, "Pro:") {
 				return "", false
