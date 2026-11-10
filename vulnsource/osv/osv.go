@@ -424,12 +424,18 @@ func (s *Source) Lookup(ctx context.Context, qs []vulnsource.Query) (map[int][]v
 		queries := make([]Query, len(batch))
 		for i, item := range batch {
 			eco, _ := Ecosystem(item.q.Ecosystem)
+			name, version := item.q.Name, item.q.Version
+			if up, ok := vulnsource.UpstreamFor(item.q.Ecosystem); ok {
+				// Known by repository: the repository is the package and
+				// the release tag the version.
+				name, version = up.Repo, up.Tag(version)
+			}
 			queries[i] = Query{
 				Package: vulnsource.Package{
-					Name:      item.q.Name,
+					Name:      name,
 					Ecosystem: eco,
 				},
-				Version: item.q.Version,
+				Version: version,
 			}
 		}
 
@@ -859,6 +865,9 @@ func Ecosystem(eco string) (string, bool) {
 	// product repository (enterprise_linux:9::baseos, ::appstream, EUS), and
 	// an image's rpm database does not record the repository a package came
 	// from.
+	if _, ok := vulnsource.UpstreamFor(eco); ok {
+		return "GIT", true
+	}
 	if name, release, ok := strings.Cut(eco, ":"); ok && release != "" {
 		switch name {
 		case "alpine":

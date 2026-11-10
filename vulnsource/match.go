@@ -245,6 +245,9 @@ func (r *Record) Affects(pkgName, wireEcosystem, version string) bool {
 // be ordered. That is a genuine "we do not know", and any answer invented to
 // fill it would reintroduce the defect in a new form.
 func (r *Record) FixedVersion(pkgName, wireEcosystem, installed string) string {
+	if wireEcosystem == "GIT" && pkgName == "openssl" {
+		return r.opensslFix(installed)
+	}
 	intervals := r.ecoIntervals(pkgName, wireEcosystem)
 
 	// A single interval leaves nothing to select between, and its bounds are

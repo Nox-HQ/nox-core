@@ -228,7 +228,9 @@ type Import struct {
 
 // Range is a version range with events marking introduction / fix.
 type Range struct {
-	Type   string  `json:"type"`
+	Type string `json:"type"`
+	// Repo is the source repository a GIT range's commits belong to.
+	Repo   string  `json:"repo,omitempty"`
 	Events []Event `json:"events"`
 }
 
