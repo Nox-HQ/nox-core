@@ -65,7 +65,7 @@ type entry struct {
 const pruneAfter = 90 * 24 * time.Hour
 
 // recordSchema versions the cached Record encoding (see key).
-const recordSchema = "2"
+const recordSchema = "3"
 
 // DefaultCacheDir returns the default advisory cache directory
 // (~/.nox/cache/advisories/).
@@ -104,7 +104,8 @@ func NewFileCache(dir string) *FileCache {
 // directory.
 //
 // recordSchema joins them because an entry is a re-encoded Record: one written
-// by code whose Record lacked a field (Debian urgency, before 2) would serve
+// by code whose Record lacked a field (Debian urgency before 2, a GIT range's
+// repo before 3) would serve
 // without it until the advisory next changed upstream. Bump it whenever Record
 // gains a field decoded from the advisory; every entry is fetched once more.
 func key(id, validator string) string {
