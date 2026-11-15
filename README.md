@@ -1,5 +1,7 @@
 # nox-core
 
+[![nox security grade](.github/nox-badge.svg)](https://github.com/nox-hq/nox)
+
 The shared kernel of the NOX security tooling: the evidence spine, the
 vulnerability-source seam, the degradation vocabulary, and the predictive
 slopsquat feed.

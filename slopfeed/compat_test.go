@@ -30,7 +30,7 @@ const (
 	bundledDigest     = "sha256:f9ae0d9a50569e6ab8a6ed2e138a69f13fdcb8f51160eccfb3b73620ab9871e1"
 	bundledEntries    = 62
 
-	goldenSignature = "JPu88uBYnEPCzRYb2e2gNA/7BGuYkVCNLCraTbEejQH6fnbC6wBkQ4iPk7Mw2lx+4bteE0LCc1UFW7mruAwKBg=="
+	goldenSignature = "JPu88uBYnEPCzRYb2e2gNA/7BGuYkVCNLCraTbEejQH6fnbC6wBkQ4iPk7Mw2lx+4bteE0LCc1UFW7mruAwKBg==" // nox:ignore SEC-161 -- an Ed25519 signature made with the public test seed 0x01..0x20; a signature is public by construction
 	goldenKeyID     = "golden-test-key"
 
 	sampleDigest = "sha256:224b7066bff102aebded891023df9ce730ba8c37a314d0e503215fbff9c3b2bf"
